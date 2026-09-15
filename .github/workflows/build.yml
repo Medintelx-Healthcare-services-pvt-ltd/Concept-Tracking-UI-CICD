@@ -3,10 +3,10 @@ name: Build and Deploy Angular UI
 on:
   push:
     branches:
-      - main
+      - QA
   pull_request:
     branches:
-      - main
+      - QA
 
 permissions:
   contents: write
@@ -33,7 +33,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/QA' && github.event_name == 'push'
     runs-on: self-hosted
 
     steps:
@@ -61,7 +61,7 @@ jobs:
               exit 1
           }
 
-      - name: Checkout latest main
+      - name: Checkout latest QA
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -246,7 +246,7 @@ jobs:
               exit 1
           }
 
-      - name: Commit version bump back to main
+      - name: Commit version bump back to QA
         shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -264,20 +264,20 @@ jobs:
           $localContent = Get-Content $filePath -Raw
           $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($localContent))
 
-          # Need the current file's blob sha on main before we can overwrite it
-          $fileInfo = Invoke-RestMethod -Uri "$api/repos/$env:REPO/contents/$filePath`?ref=main" -Headers $headers
+          # Need the current file's blob sha on QA before we can overwrite it
+          $fileInfo = Invoke-RestMethod -Uri "$api/repos/$env:REPO/contents/$filePath`?ref=QA" -Headers $headers
 
           $body = @{
               message = "chore: bump version to $env:NEW_VERSION [skip ci]"
               content = $encoded
               sha     = $fileInfo.sha
-              branch  = "main"
+              branch  = "QA"
           } | ConvertTo-Json
 
           try {
               Invoke-RestMethod -Method Put -Uri "$api/repos/$env:REPO/contents/$filePath" `
                   -Headers $headers -Body $body -ContentType "application/json"
-              Write-Host "Committed version.ts bump ($env:NEW_VERSION) back to main"
+              Write-Host "Committed version.ts bump ($env:NEW_VERSION) back to QA"
           }
           catch {
               Write-Host "Failed to commit version bump: $($_.Exception.Message)"
