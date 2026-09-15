@@ -134,6 +134,8 @@
     justify-content: space-between;
     gap: 10px;
     min-width: 0;
+    /* Anchors .stat-info-popover, which is positioned relative to this card */
+    position: relative;
 }
 
 .stat-body {
@@ -161,6 +163,16 @@
     line-height: 1.1;
 }
 
+/* Groups the info button next to the stat's icon so both sit in the
+   card's normal flex flow instead of being absolutely positioned on
+   top of each other. */
+.stat-card-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
 .stat-icon-wrap {
     width: 40px;
     height: 40px;
@@ -169,6 +181,108 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+}
+
+/* ── Stat card info button + tooltip ──────────────
+   Hover-only tooltip (no click/state needed) showing which Development
+   Statuses are rolled into a stat card's count (see STAT_STATUS_GROUPS
+   on the backend). Sits inline right beside the card's label. ═══════ */
+.stat-label-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+}
+
+.stat-label-row .stat-label {
+    min-width: 0;
+}
+
+.stat-info-wrap {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.stat-info-btn {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    flex-shrink: 0;
+    transition: background .15s, color .15s;
+}
+
+.stat-info-btn svg {
+    width: 11px;
+    height: 11px;
+}
+
+.stat-info-btn:hover,
+.stat-info-btn:focus-visible {
+    background: var(--bg-page);
+    color: var(--blue-accent);
+}
+
+.stat-info-popover {
+    position: absolute;
+    top: 20px;
+    left: 0;
+    z-index: 20;
+    background: var(--bg-white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
+    padding: 10px 12px;
+    min-width: 150px;
+    max-width: 220px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: opacity .15s ease, transform .15s ease, visibility .15s;
+    pointer-events: none;
+}
+
+/* Shown purely on hover (or keyboard focus) of the trigger button —
+   no click handler / component state required. */
+.stat-info-wrap:hover .stat-info-popover,
+.stat-info-btn:focus-visible+.stat-info-popover {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.stat-info-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.stat-info-popover ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stat-info-popover li {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    padding: 3px 8px;
+    border-radius: 6px;
+    /* background: var(--bg-page); */
 }
 
 /* ═══════════════════════════════════════════════
@@ -282,6 +396,22 @@
     /* Fill all available vertical space in the card */
     flex: 1;
     min-height: 300px;
+}
+:host ::ng-deep .ag-cell {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+:host ::ng-deep .ag-tooltip {
+    width: 280px;
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: normal;
+    line-height: 1.4;
+    padding: 8px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
 }
 
 /* ═══════════════════════════════════════════════

@@ -1,4 +1,4 @@
-import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Component, OnInit, OnDestroy, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LayoutComponent } from '../../../layout/layout/layout';
@@ -24,6 +24,15 @@ import { debounceTime, distinctUntilChanged } from 'rxjs/operators';
 
 ModuleRegistry.registerModules([AllCommunityModule, InfiniteRowModelModule]);
 
+/** Shape of each grouped stat returned by /api/dashboard-concepts — a
+ *  count plus the exact Development Statuses rolled into it (see
+ *  STAT_STATUS_GROUPS in the backend's dashboard.py, the single source
+ *  of truth both the count and this list are derived from). */
+interface StatGroup {
+  count: number;
+  statuses: string[];
+}
+
 @Component({
   selector: 'app-dashboard',
   standalone: true,
@@ -34,7 +43,7 @@ ModuleRegistry.registerModules([AllCommunityModule, InfiniteRowModelModule]);
 })
 export class DashboardComponent implements OnInit, OnDestroy {
 
-  constructor(private router: Router, private service: Service, private datePipe: DatePipe) {}
+  constructor(private router: Router, private service: Service, private datePipe: DatePipe) { }
 
   // ── AG Grid ───────────────────────────────────────────
   rowModelType: RowModelType = 'infinite';
@@ -54,17 +63,17 @@ export class DashboardComponent implements OnInit, OnDestroy {
   columnDefs: ColDef[] = [];
 
   defaultColDef: ColDef = {
-    sortable:   true,
-    filter:     true,
-    resizable:  true,
+    sortable: true,
+    filter: true,
+    resizable: true,
     suppressMovable: true,
     minWidth: 182,
     filterParams: {
-      maxNumConditions:         1,
-      suppressAndOrCondition:   true,
+      maxNumConditions: 1,
+      suppressAndOrCondition: true,
       suppressConditionAndButton: true,
-      buttons:       ['reset', 'apply'],
-      closeOnApply:  true,
+      buttons: ['reset', 'apply'],
+      closeOnApply: true,
       filterOptions: [
         'contains',
         'notContains',
@@ -162,15 +171,68 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   // ── Stat values ───────────────────────────────────────
-  totalConcepts      = 0;
-  newConcepts        = 0;
-  conceptsInProgress = 0;
-  pendingApprovals   = 0;
-  qaScheduled        = 0;
-  productionReady    = 0;
+  // totalConcepts has no status group (it's just the row count), so it
+  // stays a plain number. Every other card is backed by a StatGroup so
+  // the info button can show exactly which statuses feed that count.
+  totalConcepts = 0;
+  newConceptsStat: StatGroup = { count: 0, statuses: [] };
+  inProgressStat: StatGroup = { count: 0, statuses: [] };
+  pendingApprovalsStat: StatGroup = { count: 0, statuses: [] };
+  qaScheduledStat: StatGroup = { count: 0, statuses: [] };
+  inProductionStat: StatGroup = { count: 0, statuses: [] };
 
   get totalConceptsDisplay(): string {
     return this.totalConcepts.toLocaleString();
+  }
+
+  /** Accepts either the new { count, statuses } shape or a plain number
+   *  (in case the backend ever reverts to the older shape), so this
+   *  doesn't hard-fail if the two sides briefly drift during a deploy. */
+  private normalizeStatGroup(raw: any): StatGroup {
+    if (raw && typeof raw === 'object' && 'count' in raw) {
+      return { count: raw.count ?? 0, statuses: raw.statuses ?? [] };
+    }
+    return { count: typeof raw === 'number' ? raw : 0, statuses: [] };
+  }
+
+  /** Single place mapping the API's stats object onto the component's
+   *  fields — called from both bootstrapColumnsThenStart() and
+   *  setDatasource()'s getRows(), so the two response handlers can't
+   *  drift apart on which backend key feeds which card.
+   *
+   *  NOTE the key mapping below is NOT 1:1 with the card labels — the
+   *  backend's stat keys (Programming / QA / PendingApproval /
+   *  Production) predate this component's card names (In Progress /
+   *  QA Scheduled / Pending Approvals / In Production) and were never
+   *  renamed to match, so it's easy to wire the wrong pair up. */
+  private mapStats(stats: any): void {
+    this.totalConcepts = stats?.totalConcepts ?? 0;
+    this.newConceptsStat = this.normalizeStatGroup(stats?.newConcepts);
+    this.inProgressStat = this.normalizeStatGroup(stats?.Programming);
+    this.pendingApprovalsStat = this.normalizeStatGroup(stats?.PendingApproval);
+    this.qaScheduledStat = this.normalizeStatGroup(stats?.QA);
+    this.inProductionStat = this.normalizeStatGroup(stats?.Production);
+  }
+
+  // ── Stat card info popovers ──────────────────────────────
+  /** Key of whichever stat card's info popover is currently open, or
+   *  null if none. Only one open at a time. */
+  activeInfoCard: string | null = null;
+
+  /** Opens/closes the popover for one card. stopPropagation() keeps this
+   *  same click from immediately re-triggering closeInfoCard() below via
+   *  bubbling to document. */
+  toggleInfoCard(key: string, event: MouseEvent): void {
+    event.stopPropagation();
+    this.activeInfoCard = this.activeInfoCard === key ? null : key;
+  }
+
+  /** Closes any open popover on a click anywhere else on the page
+   *  (the popover's own trigger button stops propagation above, so this
+   *  only fires for genuine "clicked away" clicks). */
+  @HostListener('document:click')
+  closeInfoCard(): void {
+    this.activeInfoCard = null;
   }
 
   // ── Lifecycle ─────────────────────────────────────────
@@ -240,12 +302,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
     this.service.getdashboardConcepts(this.buildRequestBody(1, 1, [])).subscribe({
       next: (res) => {
-        this.totalConcepts      = res.stats.totalConcepts;
-        this.newConcepts        = res.stats.newConcepts;
-        this.conceptsInProgress = res.stats.conceptsInProgress;
-        this.pendingApprovals   = res.stats.pendingApprovals;
-        this.qaScheduled        = res.stats.qaScheduled;
-        this.productionReady    = res.stats.productionReady;
+        this.mapStats(res.stats);
 
         this.columnDefs = this.buildColumnDefsFromMetadata(res.columnMetadata);
         this.gridApi.setGridOption('columnDefs', this.columnDefs);
@@ -290,69 +347,64 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   setDatasource(): void {
-  this.loading = true;
+    this.loading = true;
 
-  const datasource: IDatasource = {
-    getRows: (params: IGetRowsParams) => {
-      const startRow = params.startRow;
-      const currentPage = Math.floor(startRow / this.PAGE_SIZE) + 1;
+    const datasource: IDatasource = {
+      getRows: (params: IGetRowsParams) => {
+        const startRow = params.startRow;
+        const currentPage = Math.floor(startRow / this.PAGE_SIZE) + 1;
 
-      this.loading = true;
+        this.loading = true;
 
-      // Only trigger AG Grid's own loading overlay for fetches AFTER the
-      // first one. On the very first load, initialLoad is still true and
-      // our custom "Loading concepts…" element already covers the grid —
-      // letting the grid ALSO call showLoadingOverlay() here stacked a
-      // second "Loading..." underneath it, which is what was still
-      // visible in the screenshot.
-      if (!this.initialLoad) {
-        this.gridApi.setGridOption('loading', true);
-        this.gridApi.showLoadingOverlay();
-      }
-
-      const requestBody = this.buildRequestBody(currentPage, this.PAGE_SIZE, params.sortModel);
-
-      this.service.getdashboardConcepts(requestBody).subscribe({
-        next: (res: any) => {
-          this.totalConcepts      = res.stats.totalConcepts;
-          this.newConcepts        = res.stats.newConcepts;
-          this.conceptsInProgress = res.stats.conceptsInProgress;
-          this.pendingApprovals   = res.stats.pendingApprovals;
-          this.qaScheduled        = res.stats.qaScheduled;
-          this.productionReady    = res.stats.productionReady;
-
-          if (res?.columnMetadata && this.columnDefs.length === 0) {
-            this.columnDefs = this.buildColumnDefsFromMetadata(res.columnMetadata);
-            this.gridApi.setGridOption('columnDefs', this.columnDefs);
-          }
-
-          const rows = res?.data ?? [];
-          const totalCount = res?.totalCount ?? 0;
-          params.successCallback(rows, totalCount);
-          this.gridApi.setGridOption('loading', false);
-          this.loading = false;
-          this.initialLoad = false;   // from here on, grid overlay alone is used
-
-          if (rows.length === 0) {
-            this.gridApi.showNoRowsOverlay();
-          } else {
-            this.gridApi.hideOverlay();
-          }
-        },
-        error: () => {
-          this.loading = false;
-          this.initialLoad = false;
-          this.gridApi.hideOverlay();
-          this.gridApi.setGridOption('loading', false);
-          params.failCallback();
-          console.error('Failed to load dashboard concepts.');
+        // Only trigger AG Grid's own loading overlay for fetches AFTER the
+        // first one. On the very first load, initialLoad is still true and
+        // our custom "Loading concepts…" element already covers the grid —
+        // letting the grid ALSO call showLoadingOverlay() here stacked a
+        // second "Loading..." underneath it, which is what was still
+        // visible in the screenshot.
+        if (!this.initialLoad) {
+          this.gridApi.setGridOption('loading', true);
+          this.gridApi.showLoadingOverlay();
         }
-      });
-    }
-  };
 
-  this.gridApi.setGridOption('datasource', datasource);
-}
+        const requestBody = this.buildRequestBody(currentPage, this.PAGE_SIZE, params.sortModel);
+
+        this.service.getdashboardConcepts(requestBody).subscribe({
+          next: (res: any) => {
+            this.mapStats(res.stats);
+
+            if (res?.columnMetadata && this.columnDefs.length === 0) {
+              this.columnDefs = this.buildColumnDefsFromMetadata(res.columnMetadata);
+              this.gridApi.setGridOption('columnDefs', this.columnDefs);
+            }
+
+            const rows = res?.data ?? [];
+            const totalCount = res?.totalCount ?? 0;
+            params.successCallback(rows, totalCount);
+            this.gridApi.setGridOption('loading', false);
+            this.loading = false;
+            this.initialLoad = false;   // from here on, grid overlay alone is used
+
+            if (rows.length === 0) {
+              this.gridApi.showNoRowsOverlay();
+            } else {
+              this.gridApi.hideOverlay();
+            }
+          },
+          error: () => {
+            this.loading = false;
+            this.initialLoad = false;
+            this.gridApi.hideOverlay();
+            this.gridApi.setGridOption('loading', false);
+            params.failCallback();
+            console.error('Failed to load dashboard concepts.');
+          }
+        });
+      }
+    };
+
+    this.gridApi.setGridOption('datasource', datasource);
+  }
   private buildColumnDefsFromMetadata(metadata: any): ColDef[] {
     const orderedFields: string[] = Object.keys(metadata || {});
 
@@ -362,23 +414,23 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
       const filter: ColDef['filter'] =
         meta.type === 'date' ? DateFilterComponent :
-        meta.type === 'number' || meta.type === 'float' ? 'agNumberColumnFilter' :
-        'agTextColumnFilter';
+          meta.type === 'number' || meta.type === 'float' ? 'agNumberColumnFilter' :
+            'agTextColumnFilter';
 
       // meta.filterOperations now arrives already using AG Grid's own
       // operator keys (notContains, greaterThan, inRange, ...) — passed
       // straight through to filterOptions, no translation needed.
       const filterParams = isDateColumn
         ? {
-            ...this.defaultColDef.filterParams,
-            filterOptions: meta.filterOperations || [
-              'equals', 'notEqual', 'lessThan', 'greaterThan', 'inRange'
-            ]
-          }
+          ...this.defaultColDef.filterParams,
+          filterOptions: meta.filterOperations || [
+            'equals', 'notEqual', 'lessThan', 'greaterThan', 'inRange'
+          ]
+        }
         : {
-            ...this.defaultColDef.filterParams,
-            filterOptions: meta.filterOperations
-          };
+          ...this.defaultColDef.filterParams,
+          filterOptions: meta.filterOperations
+        };
 
       const column: ColDef = {
         field,
@@ -404,26 +456,30 @@ export class DashboardComponent implements OnInit, OnDestroy {
       }
 
       if (isDateColumn) {
-  column.valueFormatter = (params) => {
-    return this.datePipe.transform(params.value, 'MM/dd/yyyy') ?? '';
-  };
+        column.valueFormatter = (params) => {
+          return this.datePipe.transform(params.value, 'MM/dd/yyyy') ?? '';
+        };
 
-  column.filterParams = {
-    ...column.filterParams,
-    comparator: (filterLocalDateAtMidnight: Date, cellValue: string) => {
-      if (!cellValue) return -1;
+        column.filterParams = {
+          ...column.filterParams,
+          comparator: (filterLocalDateAtMidnight: Date, cellValue: string) => {
+            if (!cellValue) return -1;
 
-      const cellDate = new Date(cellValue);
-      cellDate.setHours(0, 0, 0, 0);
+            const cellDate = new Date(cellValue);
+            cellDate.setHours(0, 0, 0, 0);
 
-      if (cellDate.getTime() === filterLocalDateAtMidnight.getTime()) {
-        return 0;
+            if (cellDate.getTime() === filterLocalDateAtMidnight.getTime()) {
+              return 0;
+            }
+
+            return cellDate < filterLocalDateAtMidnight ? -1 : 1;
+          }
+        };
       }
-
-      return cellDate < filterLocalDateAtMidnight ? -1 : 1;
-    }
-  };
-}
+      
+      if (field === 'Concept Description') {
+        column.tooltipField = field;
+      }
 
       return column;
     });

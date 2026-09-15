@@ -32,54 +32,318 @@
       <div class="config-card">
         <div class="config-card__header">
           <h2>{{ activeCategoryLabel }}</h2>
-          <button type="button" class="btn-add" (click)="openAddModal()">Add New</button>
+          <button
+            type="button"
+            class="btn-add"
+            *ngIf="
+              activeCategoryMeta.type !== 'transitions' && activeCategoryMeta.type !== 'permissions'
+            "
+            (click)="openAddModal()"
+          >
+            Add New
+          </button>
         </div>
 
         <div class="config-card__body">
-          <p class="config-status" *ngIf="isLoading()">Loading…</p>
-
-          <ng-container *ngIf="!isLoading()">
-            <div class="config-grid" *ngIf="activeItems.length; else emptyState">
-              <div class="config-item" *ngFor="let item of activeItems; trackBy: itemKey">
-                <div class="config-item__text">
-                  <span class="config-item__title">
-                    <span class="config-item__code" *ngIf="item.code" [title]="item.code">{{
-                      item.code
-                    }}</span>
-                    <span class="config-item__name" [title]="item.name">{{ item.name }}</span>
-                  </span>
-                  <span
-                    class="config-item__desc"
-                    *ngIf="item.description"
-                    [title]="item.description"
-                    >{{ item.description }}</span
-                  >
-                </div>
-                <button
-                  type="button"
-                  class="config-item__remove"
-                  (click)="requestRemoveItem(item)"
-                  [attr.aria-label]="'Remove ' + item.name"
+          <!-- ===== Status Transitions matrix ===== -->
+          <ng-container *ngIf="activeCategoryMeta.type === 'transitions'">
+            <div class="transition-controls">
+              <div class="transition-role-select">
+                <label for="transition-role">Role</label>
+                <select
+                  id="transition-role"
+                  [ngModel]="selectedRoleId()"
+                  (ngModelChange)="onRoleSelectChange($event)"
                 >
-                  <img
-                    src="/Images/bin.png"
-                    alt=""
-                    class="config-item__remove-icon"
-                    height="20"
-                    width="20"
-                  />
-                </button>
+                  <option *ngFor="let role of transitionRoles()" [ngValue]="role.role_id">
+                    {{ role.role_name }}
+                  </option>
+                </select>
+              </div>
+
+              <label class="transition-override-toggle">
+                <input
+                  type="checkbox"
+                  [checked]="canOverride()"
+                  [disabled]="isTogglingOverride() || selectedRoleId() == null"
+                  (change)="onOverrideCheckboxChange($any($event.target).checked)"
+                />
+                Can set any status (override)
+              </label>
+            </div>
+
+            <p class="config-status" *ngIf="isLoadingTransitions()">Loading…</p>
+
+            <ng-container *ngIf="!isLoadingTransitions()">
+              <p class="transition-override-note" *ngIf="canOverride()">
+                This role can already move a concept to any status. The matrix below is
+                informational only while override is on.
+              </p>
+
+              <div
+                class="transition-matrix-wrapper"
+                *ngIf="transitionStatuses().length; else noStatuses"
+              >
+                <table class="transition-matrix">
+                  <thead>
+                    <tr>
+                      <th class="transition-matrix__corner">From \ To</th>
+                      <th *ngFor="let to of transitionStatuses()">{{ to }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr *ngFor="let from of transitionStatuses()">
+                      <th class="transition-matrix__row-label">{{ from }}</th>
+                      <td *ngFor="let to of transitionStatuses()">
+                        <span *ngIf="from === to" class="transition-matrix__diagonal">—</span>
+                        <input
+                          *ngIf="from !== to"
+                          type="checkbox"
+                          [checked]="isEdgeChecked(from, to)"
+                          [disabled]="isEdgePending(from, to) || canOverride()"
+                          (change)="toggleEdge(from, to, $any($event.target).checked)"
+                        />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <ng-template #noStatuses>
+                <div class="config-empty">
+                  <p>
+                    No development statuses configured yet — add some under Development Status
+                    first.
+                  </p>
+                </div>
+              </ng-template>
+            </ng-container>
+          </ng-container>
+
+          <!-- ===== Role Permissions matrix ===== -->
+          <ng-container *ngIf="activeCategoryMeta.type === 'permissions'">
+            <div class="transition-controls">
+              <div class="transition-role-select">
+                <label for="permission-role">Role</label>
+                <select
+                  id="permission-role"
+                  [ngModel]="selectedPermRoleId()"
+                  (ngModelChange)="onPermRoleSelectChange($event)"
+                >
+                  <option *ngFor="let role of permissionRoles()" [ngValue]="role.role_id">
+                    {{ role.role_name }}
+                  </option>
+                </select>
               </div>
             </div>
 
-            <ng-template #emptyState>
-              <div class="config-empty">
-                <p>No {{ activeCategoryLabel.toLowerCase() }} entries yet.</p>
-                <button type="button" class="btn-add" (click)="openAddModal()">
-                  Add the first one
-                </button>
+            <p class="config-status" *ngIf="isLoadingPermissions()">Loading…</p>
+
+            <ng-container *ngIf="!isLoadingPermissions()">
+              <!-- Actions -->
+              <h3 class="perm-section-title">Actions</h3>
+              <div class="transition-matrix-wrapper perm-matrix-wrapper">
+                <table class="transition-matrix perm-matrix">
+                  <thead>
+                    <tr>
+                      <th class="transition-matrix__row-label">Permission</th>
+                      <th>Allowed</th>
+                      <th>Default</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr *ngFor="let row of actionPerms()">
+                      <th class="transition-matrix__row-label">{{ row.permissionKey }}</th>
+                      <td>
+                        <input
+                          type="checkbox"
+                          [checked]="row.isAllowed"
+                          [disabled]="isPermPending('actions', row.permissionKey)"
+                          (change)="toggleActionPermission(row, $any($event.target).checked)"
+                        />
+                      </td>
+                      <td class="perm-default-cell">{{ row.default ? 'Yes' : 'No' }}</td>
+                      <td class="perm-status-cell">
+                        <span *ngIf="row.isOverridden" class="perm-badge perm-badge--custom"
+                          >Custom</span
+                        >
+                        <span *ngIf="!row.isOverridden" class="perm-badge perm-badge--default"
+                          >Default</span
+                        >
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          class="perm-reset-btn"
+                          *ngIf="row.isOverridden"
+                          [disabled]="isPermPending('actions', row.permissionKey)"
+                          (click)="resetActionPermission(row)"
+                        >
+                          Reset
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            </ng-template>
+
+              <!-- Field Access -->
+              <h3 class="perm-section-title">Field Access</h3>
+              <div class="transition-matrix-wrapper perm-matrix-wrapper">
+                <table class="transition-matrix perm-matrix">
+                  <thead>
+                    <tr>
+                      <th class="transition-matrix__row-label">Field</th>
+                      <th>Access</th>
+                      <th>Default</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr *ngFor="let row of fieldPerms()">
+                      <th class="transition-matrix__row-label">{{ row.fieldName }}</th>
+                      <td>
+                        <select
+                          [ngModel]="row.accessLevel"
+                          [disabled]="isPermPending('fields', row.fieldName)"
+                          (ngModelChange)="onFieldAccessChange(row, $event)"
+                        >
+                          <option value="view">View</option>
+                          <option value="edit">Edit</option>
+                        </select>
+                      </td>
+                      <td class="perm-default-cell">
+                        {{ row.default === 'edit' ? 'Edit' : 'View' }}
+                      </td>
+                      <td class="perm-status-cell">
+                        <span *ngIf="row.isOverridden" class="perm-badge perm-badge--custom"
+                          >Custom</span
+                        >
+                        <span *ngIf="!row.isOverridden" class="perm-badge perm-badge--default"
+                          >Default</span
+                        >
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          class="perm-reset-btn"
+                          *ngIf="row.isOverridden"
+                          [disabled]="isPermPending('fields', row.fieldName)"
+                          (click)="resetFieldPermission(row)"
+                        >
+                          Reset
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Attachment Categories -->
+              <h3 class="perm-section-title">Attachment Categories</h3>
+              <div class="transition-matrix-wrapper perm-matrix-wrapper">
+                <table class="transition-matrix perm-matrix">
+                  <thead>
+                    <tr>
+                      <th class="transition-matrix__row-label">Category</th>
+                      <th>Can Manage</th>
+                      <th>Default</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr *ngFor="let row of attachmentPerms()">
+                      <th class="transition-matrix__row-label">{{ row.category }}</th>
+                      <td>
+                        <input
+                          type="checkbox"
+                          [checked]="row.canManage"
+                          [disabled]="isPermPending('attachments', row.category)"
+                          (change)="toggleAttachmentPermission(row, $any($event.target).checked)"
+                        />
+                      </td>
+                      <td class="perm-default-cell">{{ row.default ? 'Yes' : 'No' }}</td>
+                      <td class="perm-status-cell">
+                        <span *ngIf="row.isOverridden" class="perm-badge perm-badge--custom"
+                          >Custom</span
+                        >
+                        <span *ngIf="!row.isOverridden" class="perm-badge perm-badge--default"
+                          >Default</span
+                        >
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          class="perm-reset-btn"
+                          *ngIf="row.isOverridden"
+                          [disabled]="isPermPending('attachments', row.category)"
+                          (click)="resetAttachmentPermission(row)"
+                        >
+                          Reset
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </ng-container>
+          </ng-container>
+
+          <!-- ===== Regular master-data item list ===== -->
+          <ng-container
+            *ngIf="
+              activeCategoryMeta.type !== 'transitions' && activeCategoryMeta.type !== 'permissions'
+            "
+          >
+            <p class="config-status" *ngIf="isLoading()">Loading…</p>
+
+            <ng-container *ngIf="!isLoading()">
+              <div class="config-grid" *ngIf="activeItems.length; else emptyState">
+                <div class="config-item" *ngFor="let item of activeItems; trackBy: itemKey">
+                  <div class="config-item__text">
+                    <span class="config-item__title">
+                      <span class="config-item__code" *ngIf="item.code" [title]="item.code">{{
+                        item.code
+                      }}</span>
+                      <span class="config-item__name" [title]="item.name">{{ item.name }}</span>
+                    </span>
+                    <span
+                      class="config-item__desc"
+                      *ngIf="item.description"
+                      [title]="item.description"
+                      >{{ item.description }}</span
+                    >
+                  </div>
+                  <button
+                    type="button"
+                    class="config-item__remove"
+                    (click)="requestRemoveItem(item)"
+                    [attr.aria-label]="'Remove ' + item.name"
+                  >
+                    <img
+                      src="/Images/bin.png"
+                      alt=""
+                      class="config-item__remove-icon"
+                      height="20"
+                      width="20"
+                    />
+                  </button>
+                </div>
+              </div>
+
+              <ng-template #emptyState>
+                <div class="config-empty">
+                  <p>No {{ activeCategoryLabel.toLowerCase() }} entries yet.</p>
+                  <button type="button" class="btn-add" (click)="openAddModal()">
+                    Add the first one
+                  </button>
+                </div>
+              </ng-template>
+            </ng-container>
           </ng-container>
         </div>
       </div>
@@ -225,6 +489,62 @@
           (click)="confirmRemoveItem()"
         >
           {{ isRemoving() ? 'Deleting…' : 'Delete' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm modal: enabling "Can set any status (override)" -->
+  <div
+    class="modal-overlay"
+    *ngIf="pendingOverrideChange() !== null"
+    (click)="cancelOverrideChange()"
+  >
+    <div
+      class="modal-card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="override-confirm-title"
+      (click)="$event.stopPropagation()"
+    >
+      <div class="modal-card__header">
+        <h3 id="override-confirm-title">Enable status override?</h3>
+        <button
+          type="button"
+          class="modal-card__close"
+          aria-label="Close"
+          (click)="cancelOverrideChange()"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M3 3l10 10M13 3L3 13"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-card__body">
+        <p class="modal-confirm-text">
+          Turning this on lets <strong>{{ pendingOverrideRoleName }}</strong> move a concept to
+          <strong>any status, with no restrictions</strong> — the transition matrix above will no
+          longer be enforced for this role. Are you sure you want to continue?
+        </p>
+      </div>
+
+      <div class="modal-confirm-actions">
+        <button type="button" class="modal-cancel-btn" (click)="cancelOverrideChange()">
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="modal-delete-btn"
+          [disabled]="isTogglingOverride()"
+          (click)="confirmOverrideChange()"
+        >
+          {{ isTogglingOverride() ? 'Enabling…' : 'Enable override' }}
         </button>
       </div>
     </div>

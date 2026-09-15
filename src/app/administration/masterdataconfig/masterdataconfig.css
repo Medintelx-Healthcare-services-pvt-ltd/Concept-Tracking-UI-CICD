@@ -479,3 +479,190 @@
     opacity: 0.65;
     cursor: default;
 }
+
+/* ---------- Status Transitions matrix ---------- */
+.transition-controls {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 4px 4px 16px;
+    flex-wrap: wrap;
+}
+
+.transition-role-select {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.transition-role-select label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cfg-text);
+}
+
+.transition-role-select select {
+    padding: 8px 12px;
+    border: 1px solid var(--cfg-border);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--cfg-text);
+    background: var(--cfg-bg);
+}
+
+.transition-override-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cfg-text);
+    cursor: pointer;
+}
+
+.transition-override-note {
+    margin: 0 4px 14px;
+    font-size: 13px;
+    color: var(--cfg-muted);
+    background: var(--cfg-row-hover);
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+.transition-matrix-wrapper {
+    overflow: auto;
+    max-width: 100%;
+}
+
+.transition-matrix {
+    border-collapse: collapse;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.transition-matrix th,
+.transition-matrix td {
+    border: 1px solid var(--cfg-border);
+    padding: 8px 10px;
+    text-align: center;
+}
+
+.transition-matrix thead th {
+    background: var(--cfg-row-hover);
+    font-weight: 700;
+    color: var(--cfg-text);
+    position: sticky;
+    top: 0;
+}
+
+.transition-matrix__corner {
+    background: var(--cfg-row);
+    position: sticky;
+    left: 0;
+    top: 0;
+    z-index: 2;
+}
+
+.transition-matrix__row-label {
+    text-align: left;
+    background: var(--cfg-row-hover);
+    font-weight: 700;
+    color: var(--cfg-text);
+    position: sticky;
+    left: 0;
+}
+
+.transition-matrix__diagonal {
+    color: var(--cfg-muted);
+}
+
+/* ---------- Role Permissions matrix ---------- */
+.perm-section-title {
+    margin: 20px 4px 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--cfg-text);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.perm-section-title:first-of-type {
+    margin-top: 4px;
+}
+
+.perm-matrix-wrapper {
+    margin-bottom: 8px;
+}
+
+.perm-matrix th,
+.perm-matrix td {
+    text-align: left;
+}
+
+.perm-matrix thead th:not(.transition-matrix__row-label) {
+    text-align: center;
+}
+
+.perm-matrix td:not(:first-child) {
+    text-align: center;
+}
+
+.perm-default-cell {
+    color: var(--cfg-muted);
+    font-weight: 600;
+}
+
+.perm-status-cell {
+    white-space: nowrap;
+}
+
+.perm-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.perm-badge--custom {
+    background: var(--cfg-blue);
+    color: #fff;
+}
+
+.perm-badge--default {
+    background: var(--cfg-row);
+    color: var(--cfg-muted);
+}
+
+.perm-reset-btn {
+    border: 1px solid var(--cfg-border);
+    background: transparent;
+    color: var(--cfg-text);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease;
+}
+
+.perm-reset-btn:hover:not(:disabled) {
+    background: var(--cfg-row);
+}
+
+.perm-reset-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.perm-matrix select {
+    padding: 6px 10px;
+    border: 1px solid var(--cfg-border);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--cfg-text);
+    background: var(--cfg-bg);
+}

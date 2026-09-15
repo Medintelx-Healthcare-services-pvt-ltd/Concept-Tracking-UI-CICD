@@ -225,6 +225,35 @@
           <img class="lu-hourglass-icon" src="Images/hourglass.png" alt="Draft" title="Draft" />
           Draft
         </span>
+
+        <!-- Copy Concept — only meaningful once a real concept is loaded
+             (nothing to copy on the blank "new concept" form) and only for
+             roles allowed to originate concepts, since this ultimately
+             lands the user on a new, unsaved concept just like
+             "+ Add New Concept" does. -->
+        <button
+          type="button"
+          class="btn-copy-concept"
+          *ngIf="conceptId && canCreateConcept"
+          [disabled]="copyingConcept"
+          (click)="onCopyConcept()"
+          title="Copy this concept into a new one"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+          {{ copyingConcept ? 'Copying…' : 'Copy' }}
+        </button>
       </div>
       <div class="page-meta">
         <span>Concept ID : {{ displayConceptId || conceptId }}</span>
@@ -271,6 +300,33 @@
           type="button"
           class="draft-lock-close"
           (click)="dismissDraftLockBanner()"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    }
+
+    <!-- Production-lock info banner — flashes briefly once when a
+         Production-locked concept loads (same timed show/auto-hide
+         pattern as the draft-lock banner above via
+         flashProductionLockBanner(), rather than staying pinned on
+         screen). Every field is disabled at that point for every role;
+         Manager alone can still change the Development Status dropdown
+         and add a Development Note. -->
+    @if (showProductionLockBanner) {
+      <div class="draft-lock-banner">
+        <span class="draft-lock-icon">i</span>
+        <span class="draft-lock-text">
+          {{ recordLockedMessage }}
+          @if (isProductionLocked && isManager) {
+            As Manager, you can still change the Development Status below.
+          }
+        </span>
+        <button
+          type="button"
+          class="draft-lock-close"
+          (click)="dismissProductionLockBanner()"
           aria-label="Dismiss"
         >
           ✕
@@ -478,61 +534,6 @@
             </div>
           </div>
         </section>
-        <!-- ─ Development Notes ─ -->
-        <section class="card">
-          <h2 class="card-title">Development Notes</h2>
-
-          <!-- Existing notes -->
-          <div class="notes-list" #notesListRef>
-            <div class="note-item" *ngFor="let note of devNotes; let i = index; let last = last">
-              <div class="note-avatar-col">
-                <div class="note-avatar" [style.background]="note.avatarBg">
-                  {{ note.initials }}
-                </div>
-                <!-- Connecting line down to the next note's avatar — last
-                     note in the list has nothing below it to connect to. -->
-                <div class="note-connector" *ngIf="!last"></div>
-              </div>
-              <div class="note-body">
-                <div class="note-header">
-                  <div class="div" style="display: flex; gap: 5px; justify-content: space-between">
-                    <span class="note-author">{{ note.author }}</span>
-                    <span class="note-RoleName">~ {{ note.RoleName }}</span>
-                  </div>
-                  <span class="note-time">{{ note.time | date: 'MMM d, yyyy' }}</span>
-                </div>
-                <p class="note-text">{{ note.text }}</p>
-              </div>
-            </div>
-          </div>
-
-          <!-- Add note input row -->
-          <div class="note-add-row">
-            <div class="note-avatar self-avatar">{{ currentUserInitial }}</div>
-            <input
-              type="text"
-              class="note-input"
-              [class.note-input-invalid]="noteInputInvalid"
-              placeholder="Add Development Notes..."
-              [(ngModel)]="newNoteText"
-              [ngModelOptions]="{ standalone: true }"
-              (input)="onNoteInputChange()"
-              [disabled]="!canEdit"
-              [title]="!canEdit ? 'You do not have permission to add development notes.' : ''"
-            />
-          </div>
-          <!-- Typed text above is only ever picked up and shown in the
-               list once Update is clicked and the save succeeds (see
-               submitConcept()'s pendingNote handling) — there's no
-               optimistic add on Enter anymore, so exactly one note goes
-               out, and it doesn't appear until it's actually saved. -->
-          <p class="note-pending-hint" *ngIf="newNoteText.trim()">
-            Will be saved when you click Update or Create Concept.
-          </p>
-          <p class="note-required-hint" *ngIf="noteInputInvalid">
-            A Development Note is required — describe what changed above.
-          </p>
-        </section>
 
         <section class="card">
           <h2 class="card-title">Estimation &amp; Scoring</h2>
@@ -540,7 +541,8 @@
             <!-- Estimated Volume -->
             <div class="form-field">
               <label class="field-label">
-                Estimated Volume <span class="required-mark">*</span>
+                Estimated Volume
+                <span class="required-mark" *ngIf="estimatedFieldsRequired">*</span>
               </label>
 
               <div
@@ -577,7 +579,8 @@
             <!-- Estimated Dollars -->
             <div class="form-field">
               <label class="field-label">
-                Estimated Dollars <span class="required-mark">*</span>
+                Estimated Dollars
+                <span class="required-mark" *ngIf="estimatedFieldsRequired">*</span>
               </label>
 
               <div
@@ -809,6 +812,99 @@
           </div>
         </section>
 
+        <!-- ─ Development Notes ─ -->
+        <section class="card notes-card" [class.collapsed]="!notesExpanded">
+          <button
+            type="button"
+            class="notes-card-header"
+            (click)="toggleNotesExpanded()"
+            [disabled]="devNotes.length === 0"
+            [attr.aria-expanded]="notesExpanded"
+          >
+            <div class="notes-card-header-left">
+              <h2 class="card-title notes-card-title">Development Notes</h2>
+              <span class="notes-count-badge" *ngIf="devNotes.length">{{ devNotes.length }}</span>
+            </div>
+            <span
+              class="notes-chevron"
+              *ngIf="devNotes.length > 0"
+              [class.notes-chevron-open]="notesExpanded"
+              aria-hidden="true"
+            ></span>
+          </button>
+
+          <!-- Existing notes — only the list of past notes collapses.
+               The add-note input below stays visible in both states so
+               someone can jot a note without first having to open the
+               card. -->
+          <div class="notes-list" #notesListRef *ngIf="notesExpanded">
+            <div class="note-item" *ngFor="let note of devNotes; let i = index; let last = last">
+              <div class="note-avatar-col">
+                <div class="note-avatar" [style.background]="note.avatarBg">
+                  {{ note.initials }}
+                </div>
+                <!-- Connecting line down to the next note's avatar — last
+                     note in the list has nothing below it to connect to. -->
+                <div class="note-connector" *ngIf="!last"></div>
+              </div>
+              <div class="note-body">
+                <div class="note-header">
+                  <div class="div" style="display: flex; gap: 5px; justify-content: space-between">
+                    <span class="note-author">{{ note.author }}</span>
+                    <span class="note-RoleName">~ {{ note.RoleName }}</span>
+                  </div>
+                  <span class="note-time">{{ note.time | date: 'MMM d, yyyy' }}</span>
+                </div>
+                <p class="note-text">{{ note.text }}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Add note input row — always rendered, collapsed or not. -->
+          <div class="note-add-row">
+            <div class="note-avatar self-avatar">{{ currentUserInitial }}</div>
+            <!-- The border/background/rounded-corner styling lives on this
+                 wrapper, not on the textarea itself, with overflow:hidden
+                 clipping to the rounded shape. That's what keeps the
+                 textarea's own vertical scrollbar (once a long note passes
+                 max-height) from overlapping/cutting through the rounded
+                 corners — the scrollbar renders inside the textarea's box,
+                 and the wrapper's overflow:hidden trims it back to the
+                 pill/rect shape. :focus-within stands in for the old
+                 textarea:focus rule since focus now lands on the child. -->
+            <div class="note-input-wrap" [class.note-input-invalid]="noteInputInvalid">
+              <textarea
+                #noteInputRef
+                class="note-input"
+                rows="1"
+                placeholder="Add Development Notes..."
+                [(ngModel)]="newNoteText"
+                [ngModelOptions]="{ standalone: true }"
+                (input)="onNoteInputChange(); autoResizeNoteInput(noteInputRef)"
+                [disabled]="!canEditNotes"
+                [title]="
+                  isRecordLocked && !(isProductionLocked && isManager)
+                    ? recordLockedMessage
+                    : !canEditNotes
+                      ? 'You do not have permission to add development notes.'
+                      : ''
+                "
+              ></textarea>
+            </div>
+          </div>
+          <!-- Typed text above is only ever picked up and shown in the
+               list once Update is clicked and the save succeeds (see
+               submitConcept()'s pendingNote handling) — there's no
+               optimistic add on Enter anymore, so exactly one note goes
+               out, and it doesn't appear until it's actually saved. -->
+          <p class="note-pending-hint" *ngIf="newNoteText.trim()">
+            Will be saved when you click Update or Create Concept.
+          </p>
+          <p class="note-required-hint" *ngIf="noteInputInvalid">
+            A Development Note is required — describe what changed above.
+          </p>
+        </section>
+
         <!-- ─ Attachments ─ -->
         <section class="card attachments-card">
           <div class="sd-header attach-header">
@@ -851,7 +947,6 @@
                   #specsInput
                   type="file"
                   accept=".pdf,.doc,.docx,.xls,.xlsx"
-                  multiple
                   hidden
                   (change)="onAttachSelected($event, 'specs')"
                 />
@@ -953,9 +1048,21 @@
                 <button
                   class="attach-remove"
                   *ngIf="canManageAttachments('specs')"
-                  (click)="removeAttachment('specs', f)"
+                  (click)="confirmRemoveAttachment('specs', f)"
                 >
-                  ✕
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
                 </button>
               </div>
             </div>
@@ -1077,7 +1184,7 @@
                 <button
                   class="attach-remove"
                   *ngIf="canManageAttachments('table')"
-                  (click)="removeAttachment('table', f)"
+                  (click)="confirmRemoveAttachment('table', f)"
                 >
                   ✕
                 </button>
@@ -1201,7 +1308,7 @@
                 <button
                   class="attach-remove"
                   *ngIf="canManageAttachments('other')"
-                  (click)="removeAttachment('other', f)"
+                  (click)="confirmRemoveAttachment('other', f)"
                 >
                   ✕
                 </button>
@@ -1216,13 +1323,15 @@
               class="btn-draft"
               *ngIf="!developmentCompleted"
               (click)="onSaveAsDraft()"
-              [disabled]="savingDraft || loading || isAttachmentUploading || !canEdit"
+              [disabled]="savingDraft || loading || isAttachmentUploading || !canSaveOrCreate"
               [title]="
-                !canEdit
-                  ? 'You do not have permission to save drafts.'
-                  : isAttachmentUploading
-                    ? 'Wait for files to finish uploading'
-                    : ''
+                isRecordLocked && !(isProductionLocked && isManager)
+                  ? recordLockedMessage
+                  : !canSaveOrCreate
+                    ? 'You do not have permission to save drafts.'
+                    : isAttachmentUploading
+                      ? 'Wait for files to finish uploading'
+                      : ''
               "
               type="button"
             >
@@ -1232,13 +1341,23 @@
             <button
               class="btn-submit"
               (click)="onSubmit()"
-              [disabled]="loading || savingDraft || isAttachmentUploading || !canEdit"
+              [disabled]="
+                loading ||
+                savingDraft ||
+                isAttachmentUploading ||
+                !canSaveOrCreate ||
+                !hasSpecsAttachment
+              "
               [title]="
-                !canEdit
-                  ? 'You do not have permission to submit concepts.'
-                  : isAttachmentUploading
-                    ? 'Wait for files to finish uploading'
-                    : ''
+                isRecordLocked && !(isProductionLocked && isManager)
+                  ? recordLockedMessage
+                  : !canSaveOrCreate
+                    ? 'You do not have permission to submit concepts.'
+                    : isAttachmentUploading
+                      ? 'Wait for files to finish uploading'
+                      : !hasSpecsAttachment
+                        ? 'The SPECS attachment is required before the concept can be created.'
+                        : ''
               "
             >
               <span *ngIf="!loading">{{ developmentCompleted ? 'Update' : 'Create Concept' }}</span>
@@ -1683,7 +1802,7 @@
                 <button
                   class="attach-remove"
                   *ngIf="canManageAttachments('approval')"
-                  (click)="removeAttachment('approval', f)"
+                  (click)="confirmRemoveAttachment('approval', f)"
                 >
                   ✕
                 </button>
@@ -1873,7 +1992,7 @@
                   <button
                     class="sd-delete-clear-btn"
                     *ngIf="canManageSupportingDocs"
-                    (click)="clearDocFile($event, i)"
+                    (click)="confirmClearDocFile($event, i)"
                     title="Clear file"
                   >
                     Clear
@@ -2050,7 +2169,7 @@
                   <button
                     class="sd-del-btn"
                     *ngIf="canManageSupportingDocs"
-                    (click)="removeSupportingDoc(i)"
+                    (click)="confirmRemoveSupportingDoc(i)"
                     [disabled]="doc.file && doc.uploadProgress < 100"
                     [title]="
                       doc.file && doc.uploadProgress < 100
@@ -2139,7 +2258,7 @@
           <div class="step-info">
             <span class="step-name">Client Approval</span>
             <span class="step-sub">
-              {{ clientApprovalCompleted ? 'concept Approved' : 'Not Approved' }}
+              {{ clientApprovalStatusLabel }}
             </span>
           </div>
         </li>
@@ -2161,6 +2280,123 @@
           </div>
         </li>
       </ul>
+    </div>
+
+    <!-- ── Activity History ── -->
+    <div class="activity-card">
+      <div class="activity-card-header">
+        <h3 class="activity-title">Activity history</h3>
+        <div class="activity-header-icons">
+          <span
+            class="activity-legend-wrap"
+            #activityLegendWrap
+            [class.legend-force-closed]="legendHoverSuppressed"
+            (mouseenter)="onActivityLegendHoverStart()"
+            (mouseleave)="legendHoverSuppressed = false"
+          >
+            <button
+              type="button"
+              class="activity-info-btn"
+              (click)="toggleActivityLegend()"
+              [attr.aria-expanded]="showActivityLegend"
+              title="What do the colors mean?"
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="16" x2="12" y2="11" />
+                <line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+            </button>
+
+            <!-- Legend popover — opens on hover (desktop); the info button's
+                 click also toggles it via .is-open, as a fallback for touch
+                 devices that have no hover state (and to pin it open).
+                 Positioned with `position: fixed` using coordinates computed
+                 in the component (see positionActivityLegend()) instead of
+                 `absolute`, so it renders relative to the viewport and can't
+                 be clipped by .right-panel's overflow or buried under the
+                 center panel. -->
+            <div
+              class="activity-legend-popover"
+              [class.is-open]="showActivityLegend"
+              [style.top.px]="activityLegendPos.top"
+              [style.left.px]="activityLegendPos.left"
+              (click)="$event.stopPropagation()"
+            >
+              <div class="activity-legend-header">
+                <span>Dot color guide</span>
+                <button
+                  type="button"
+                  class="activity-legend-close"
+                  (click)="closeActivityLegend()"
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+              <ul class="activity-legend-list">
+                <li *ngFor="let entry of activityDotLegend" class="activity-legend-row">
+                  <span
+                    class="activity-dot activity-legend-dot"
+                    [ngClass]="'dot-' + entry.color"
+                  ></span>
+                  <span class="activity-legend-color-name">{{ entry.colorLabel }}</span>
+                  <span class="activity-legend-arrow">→</span>
+                  <span class="activity-legend-label">{{ entry.label }}</span>
+                </li>
+                <li *ngIf="!activityDotLegend.length" class="activity-legend-empty">
+                  Legend not available yet.
+                </li>
+              </ul>
+            </div>
+          </span>
+          <!-- <span class="activity-history-icon" aria-hidden="true">⟲</span> -->
+        </div>
+      </div>
+
+      <!-- Backdrop to close the click-opened (touch fallback) legend when
+           tapping anywhere else on the page. -->
+      <div
+        class="activity-legend-backdrop"
+        *ngIf="showActivityLegend"
+        (click)="closeActivityLegend()"
+      ></div>
+
+      <div *ngIf="activityHistoryLoading" class="activity-loading">Loading...</div>
+
+      <ul *ngIf="!activityHistoryLoading" class="activity-timeline">
+        <li
+          *ngFor="let item of visibleActivityHistory"
+          class="activity-item"
+          (click)="openActivityDetail(item)"
+        >
+          <span class="activity-dot" [ngClass]="'dot-' + item.dot_color"></span>
+          <div class="activity-item-body">
+            <span class="activity-item-title">{{ item.title }}</span>
+            <span class="activity-item-time">{{ item.timestamp }}</span>
+          </div>
+        </li>
+
+        <li *ngIf="!activityHistory.length" class="activity-empty">No activity recorded yet.</li>
+      </ul>
+
+      <button
+        *ngIf="activityHistory.length > visibleActivityHistory.length || showFullActivityHistory"
+        type="button"
+        class="btn-view-full-history"
+        (click)="toggleFullActivityHistory()"
+      >
+        {{ showFullActivityHistory ? 'Show less' : 'View full history' }}
+      </button>
     </div>
 
     <!-- ownership Card right side panel -->
@@ -2231,7 +2467,7 @@
           <button
             class="owner-remove-btn"
             *ngIf="activeTab === 'development'"
-            (click)="removeOwner(owner.id)"
+            (click)="confirmRemoveOwner(owner.id)"
             title="Remove"
           >
             <svg
@@ -2341,6 +2577,176 @@
           [src]="docPdfUrl"
           title="PDF preview"
         ></iframe>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Generic delete/clear confirmation popup — shared by every
+       destructive delete/remove/clear action on this page (attachments,
+       supporting docs, doc-slot clear, owners). Opening it never performs
+       the action itself; the underlying method only runs if the user
+       confirms, via confirmPendingAction(). ── -->
+  <div class="modal-backdrop" *ngIf="showConfirmModal" (click)="cancelConfirmModal()">
+    <div class="modal-panel specs-replace-panel" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <span class="modal-title">Are you sure?</span>
+        <button type="button" class="modal-close" (click)="cancelConfirmModal()">✕</button>
+      </div>
+      <div class="specs-replace-body">
+        <div class="specs-replace-icon">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#f59e0b"
+            stroke-width="2"
+          >
+            <path
+              d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+            />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </div>
+        <p class="specs-replace-text">{{ confirmModalMessage }}</p>
+      </div>
+      <div class="modal-footer specs-replace-footer">
+        <button type="button" class="btn-draft" (click)="cancelConfirmModal()">Cancel</button>
+        <button type="button" class="btn-submit" (click)="confirmPendingAction()">
+          {{ confirmModalConfirmLabel }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SPECS replace-confirmation popup — only one SPECS file is ever
+       allowed at a time. Selecting/dropping a new one while an existing
+       SPECS file is attached pauses here instead of swapping it silently,
+       so the user has to explicitly confirm deactivating the old file. ── -->
+  <div class="modal-backdrop" *ngIf="showSpecsReplaceModal" (click)="cancelSpecsReplace()">
+    <div class="modal-panel specs-replace-panel" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <span class="modal-title">Replace SPECS file?</span>
+        <button type="button" class="modal-close" (click)="cancelSpecsReplace()">✕</button>
+      </div>
+      <div class="specs-replace-body">
+        <div class="specs-replace-icon">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#f59e0b"
+            stroke-width="2"
+          >
+            <path
+              d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+            />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </div>
+        <p class="specs-replace-text">
+          <strong>{{ pendingSpecsFileName }}</strong> will replace
+          <strong>{{ pendingSpecsExistingName }}</strong> when you click Update / Submit.
+        </p>
+      </div>
+      <div class="modal-footer specs-replace-footer">
+        <button type="button" class="btn-draft" (click)="cancelSpecsReplace()">Cancel</button>
+        <button type="button" class="btn-submit" (click)="confirmSpecsReplace()">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Superseded → new development cycle switch-confirmation popup —
+       this concept just moved to Superseded and is now fully read-only;
+       the backend spun up a new development cycle alongside it. Ask
+       before jumping the user over to it. ── -->
+  <div
+    class="modal-backdrop"
+    *ngIf="showSupersededSwitchModal"
+    (click)="dismissSupersededSwitchModal()"
+  >
+    <div class="modal-panel specs-replace-panel" (click)="$event.stopPropagation()">
+      <div class="modal-header">
+        <span class="modal-title">Concept superseded</span>
+        <button type="button" class="modal-close" (click)="dismissSupersededSwitchModal()">
+          ✕
+        </button>
+      </div>
+      <div class="specs-replace-body">
+        <div class="specs-replace-icon superseded-switch-icon">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#3b82f6"
+            stroke-width="2"
+          >
+            <path d="M17 1l4 4-4 4" />
+            <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+            <path d="M7 23l-4-4 4-4" />
+            <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+          </svg>
+        </div>
+        <p class="specs-replace-text">
+          This concept is now read-only. A new development cycle
+          <strong>{{ pendingSupersededConceptLabel }}</strong> has been created. Do you want to
+          switch to it now?
+        </p>
+      </div>
+      <div class="modal-footer specs-replace-footer">
+        <button type="button" class="btn-draft" (click)="dismissSupersededSwitchModal()">
+          Stay here
+        </button>
+        <button type="button" class="btn-submit" (click)="confirmSwitchToSupersededConcept()">
+          Switch concept
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Activity History Detail Popup ── -->
+  <div *ngIf="selectedActivity" class="activity-modal-overlay" (click)="closeActivityDetail()">
+    <div class="activity-modal" (click)="$event.stopPropagation()">
+      <div class="activity-modal-header">
+        <h3 class="activity-modal-title">{{ selectedActivity.title }}</h3>
+        <button
+          type="button"
+          class="activity-modal-close"
+          (click)="closeActivityDetail()"
+          aria-label="Close"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div class="activity-modal-row activity-modal-row--stacked">
+        <span class="activity-modal-label">Old value</span>
+        <div class="activity-modal-value activity-modal-value--scroll">
+          {{ formatActivityValue(selectedActivity.old_value) }}
+        </div>
+      </div>
+      <div class="activity-modal-row activity-modal-row--stacked">
+        <span class="activity-modal-label">New value</span>
+        <div class="activity-modal-value activity-modal-value--scroll">
+          {{ formatActivityValue(selectedActivity.new_value) }}
+        </div>
+      </div>
+      <div class="activity-modal-row">
+        <span class="activity-modal-label">Changed by</span>
+        <span class="activity-modal-value">{{ selectedActivity.changed_by }}</span>
+      </div>
+      <div class="activity-modal-row">
+        <span class="activity-modal-label">Role</span>
+        <span class="activity-modal-value">{{ selectedActivity.role }}</span>
+      </div>
+
+      <div class="activity-modal-reason-block">
+        <span class="activity-modal-label">Reason</span>
+        <p class="activity-modal-reason">{{ selectedActivity.reason }}</p>
       </div>
     </div>
   </div>

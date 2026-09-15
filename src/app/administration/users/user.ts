@@ -438,7 +438,12 @@ export class User implements OnInit, OnDestroy {
         column.headerName = 'Assigned To';
         column.minWidth = 200;
         column.cellClass = 'assigned-to-cell';
-        // column.tooltipValueGetter = (params: any) => this.rolesToNames(params.value).join(', ');
+        // Explicitly disable the native tooltip for this column. Without this
+        // it silently inherits defaultColDef's tooltipValueGetter (raw
+        // comma-separated roles string), which renders as a native browser
+        // tooltip behind/alongside the custom roles-popover below — the
+        // "ghost list" showing through on hover.
+        column.tooltipValueGetter = () => null;
         column.cellRenderer = (params: any) => {
           const names = this.rolesToNames(params.value);
           const container = document.createElement('div');
