@@ -133,6 +133,7 @@
               pattern="^[^\s@]+@[^\s@]+\.[^\s@]+$"
               [disabled]="!!editingUser"
               [title]="configForm.userName"
+              maxlength="50"
             />
           </div>
           <div class="form-field">
@@ -144,6 +145,7 @@
               placeholder="Untitled"
               [(ngModel)]="configForm.name"
               [title]="configForm.name"
+              maxlength="50"
             />
           </div>
         </div>
@@ -195,6 +197,7 @@
             name="roleName"
             placeholder="Untitled"
             [(ngModel)]="roleForm.roleName"
+            maxlength="20"
           />
         </div>
 

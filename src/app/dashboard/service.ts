@@ -97,6 +97,11 @@ export class Service {
     return this.http.get<any>(url);
   }
 
+  getConceptHistory(conceptId: string): Observable<any> {
+    const url = `${this.apiBaseUrl}api/concepts/${conceptId}/history`;
+    return this.http.get<any>(url);
+  }
+
   getLatestUpdates(): Observable<any> {
     return this.http.get<any>(`${this.apiBaseUrl}api/latest-updates`);
   }
@@ -224,6 +229,86 @@ export class Service {
 
   unassignUserRole(userId: number, roleId: number): Observable<any> {
     const url = `${this.apiBaseUrl}api/user-management/users/${userId}/roles/${roleId}`;
+    return this.http.delete<any>(url);
+  }
+
+  copyConcept(conceptId: string) {
+    return this.http.get(`${this.apiBaseUrl}api/copy-concept/${conceptId}`, {});
+  }
+
+  getStatusTransitions(roleId: number): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/status-transitions`;
+    return this.http.get<any>(url, { params: { role_id: roleId } });
+  }
+
+  addStatusTransition(payload: { role_id: number; from_status: string; to_status: string }): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/status-transitions`;
+    return this.http.post<any>(url, payload);
+  }
+
+  removeStatusTransition(transitionId: number): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/status-transitions/${transitionId}`;
+    return this.http.delete<any>(url);
+  }
+
+  setRoleOverride(roleId: number, canOverride: boolean): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/status-transitions/roles/${roleId}/override`;
+    return this.http.put<any>(url, { can_override_status: canOverride });
+  }
+
+  // =====================================================================
+  // ROLE PERMISSIONS MANAGEMENT (admin config screen)
+  // Backs role_permissions_admin_route, prefix
+  // /api/user-management/role-permissions. Every route requires the
+  // caller to already hold the 'Admin' role, same as the status-
+  // transitions and master-data management blocks above.
+  //
+  // NOTE: this is separate from getRolePermissions() further up this
+  // file, which hits the READ-ONLY, non-admin-gated resolver
+  // (GET /api/role-permissions/{role_id}) that every logged-in user
+  // calls for their own session to decide what to render.
+  // =====================================================================
+  /** Schema inventory for the admin grid — every known action key, field
+   *  name, and attachment category. Same for every role; tells the UI
+   *  what rows/columns to draw without hardcoding the list a second time
+   *  in the frontend. */
+  getPermissionKeys(): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/keys`;
+    return this.http.get<any>(url);
+  }
+  /** Full editable matrix for one role — every action/field/category,
+   *  each with its current value and an `isOverridden` flag (explicit row
+   *  vs. falling back to the schema default). This is what the admin
+   *  screen renders as its grid. */
+  getRolePermissionMatrix(roleId: number): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions`;
+    return this.http.get<any>(url, { params: { role_id: roleId } });
+  }
+  setActionPermission(roleId: number, permissionKey: string, isAllowed: boolean): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/actions/${permissionKey}`;
+    return this.http.put<any>(url, { is_allowed: isAllowed });
+  }
+  /** Removes this role's explicit override for the key — "Reset to
+   *  default" in the UI. Falls back to the schema's restrictive default,
+   *  never to an unrestricted state. */
+  resetActionPermission(roleId: number, permissionKey: string): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/actions/${permissionKey}`;
+    return this.http.delete<any>(url);
+  }
+  setFieldPermission(roleId: number, fieldName: string, accessLevel: 'edit' | 'view'): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/fields/${fieldName}`;
+    return this.http.put<any>(url, { access_level: accessLevel });
+  }
+  resetFieldPermission(roleId: number, fieldName: string): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/fields/${fieldName}`;
+    return this.http.delete<any>(url);
+  }
+  setAttachmentPermission(roleId: number, category: string, canManage: boolean): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/attachments/${category}`;
+    return this.http.put<any>(url, { can_manage: canManage });
+  }
+  resetAttachmentPermission(roleId: number, category: string): Observable<any> {
+    const url = `${this.apiBaseUrl}api/user-management/role-permissions/${roleId}/attachments/${category}`;
     return this.http.delete<any>(url);
   }
 }

@@ -159,6 +159,47 @@ body {
     height: 20px;
 }
 
+/* --- Continue with Microsoft button --- */
+.ms-btn {
+    background-color: #ffffff;
+    color: #1b1b1b;
+    border: 1px solid #8c8c8c;
+    font-weight: 500;
+}
+
+.ms-btn:hover:not(:disabled) {
+    background-color: #0179b4;
+    color: #ffffff;
+    border-color: #0179b4;
+}
+
+.ms-btn:disabled {
+    background-color: #0179b4;
+    color: #ffffff;
+    border-color: #0179b4;
+}
+
+.ms-icon {
+    flex-shrink: 0;
+}
+
+.ms-spinner {
+    width: 18px;
+    height: 18px;
+    margin-right: 10px;
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    border-top-color: #ffffff;
+    border-radius: 50%;
+    display: inline-block;
+    animation: ms-spin 0.7s linear infinite;
+}
+
+@keyframes ms-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 /* General error message styling */
 .form-error {
     color: #e74c3c;

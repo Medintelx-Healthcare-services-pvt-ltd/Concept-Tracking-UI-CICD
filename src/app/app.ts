@@ -26,8 +26,8 @@ export class App implements OnInit {
       return;
     }
     this.swUpdate.checkForUpdate().then(updateFound => {
-      console.log('Update check result:', updateFound);
-    });
+    console.log('Update check result:', updateFound);
+  });
 
     this.swUpdate.versionUpdates.subscribe(event => {
       console.log('SW event:', event);

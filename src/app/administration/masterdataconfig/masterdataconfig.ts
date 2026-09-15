@@ -6,7 +6,7 @@ import { LayoutComponent } from '../../layout/layout/layout';
 import { ToastrService } from 'ngx-toastr';
 import { Service } from '../../dashboard/service';
 
-type CategoryType = 'coded' | 'plain';
+type CategoryType = 'coded' | 'plain' | 'transitions' | 'permissions';
 
 interface ExtraField {
   key: string;         // matches a column name (description, claim_other, example)
@@ -56,6 +56,38 @@ interface MasterDataItem {
   example?: string;      // master_concepts only
 }
 
+interface RoleOption {
+  role_id: number;
+  role_name: string;
+}
+
+// ── Role Permissions matrix rows ─────────────────────────────────────────
+// Shape matches GET /api/user-management/role-permissions's response —
+// see role_permission_queries.py::fetch_*_matrix_for_role() on the backend.
+// `isOverridden` distinguishes "this role has an explicit row" from
+// "this is just the fallback default nobody's configured" — drives the
+// Default/Custom badge and whether the Reset button shows.
+interface ActionPermRow {
+  permissionKey: string;
+  isAllowed: boolean;
+  isOverridden: boolean;
+  default: boolean;
+}
+
+interface FieldPermRow {
+  fieldName: string;
+  accessLevel: 'edit' | 'view';
+  isOverridden: boolean;
+  default: 'edit' | 'view';
+}
+
+interface AttachmentPermRow {
+  category: string;
+  canManage: boolean;
+  isOverridden: boolean;
+  default: boolean;
+}
+
 @Component({
   selector: 'app-masterdataconfig',
   imports: [CommonModule, FormsModule, LayoutComponent],
@@ -90,9 +122,11 @@ export class Masterdataconfig {
     },
     { key: 'reviewType', label: 'Review Type', type: 'coded', apiSlug: 'review-type', codeLength: 1, codePlaceholder: 'e.g. A' },
     { key: 'claimType', label: 'Claim Type', type: 'coded', apiSlug: 'claim-type', codeLength: 1, codePlaceholder: 'e.g. P' },
-    { key: 'developmentStatus', label: 'Development Status', type: 'plain', apiSlug: 'development-status' },
     { key: 'priority', label: 'Priority', type: 'plain', apiSlug: 'priority' },
     { key: 'clientApprovalStatus', label: 'Client Approval Status', type: 'plain', apiSlug: 'client-approval-status' },
+    { key: 'developmentStatus', label: 'Development Status', type: 'plain', apiSlug: 'development-status' },
+    { key: 'statusTransitions', label: 'Status Transitions', type: 'transitions', apiSlug: '' },
+    // { key: 'rolePermissions', label: 'Role Permissions', type: 'permissions', apiSlug: '' },
   ];
 
   activeCategory = signal<string>(this.categories[0].key);
@@ -111,13 +145,49 @@ export class Masterdataconfig {
   pendingRemoveItem = signal<MasterDataItem | null>(null);
   isRemoving = signal(false);
 
+  // ---- Status Transitions state ----
+  transitionRoles = signal<RoleOption[]>([]);
+  transitionStatuses = signal<string[]>([]);
+  selectedRoleId = signal<number | null>(null);
+  // "from||to" -> transition id, for existing edges of the selected role
+  transitionEdgeMap = signal<Map<string, number>>(new Map());
+  canOverride = signal(false);
+  isLoadingTransitions = signal(false);
+  isTogglingOverride = signal(false);
+  // Non-null while the "turn override ON" confirm modal is open. Only used
+  // for enabling — disabling override is always safe (it only restricts
+  // further) so that path skips confirmation and calls onOverrideToggle
+  // directly.
+  pendingOverrideChange = signal<boolean | null>(null);
+  // "from||to" keys currently mid-request, to disable that one checkbox
+  pendingEdgeKeys = signal<Set<string>>(new Set());
+
+  // ---- Role Permissions state ----
+  permissionRoles = signal<RoleOption[]>([]);
+  selectedPermRoleId = signal<number | null>(null);
+  actionPerms = signal<ActionPermRow[]>([]);
+  fieldPerms = signal<FieldPermRow[]>([]);
+  attachmentPerms = signal<AttachmentPermRow[]>([]);
+  isLoadingPermissions = signal(false);
+  // "actions::key" / "fields::name" / "attachments::category" currently
+  // mid-request, to disable that one control while its call is in flight.
+  pendingPermKeys = signal<Set<string>>(new Set());
+
   constructor(
     private service: Service,
     private toastr: ToastrService,
   ) {
     // Reload the list any time the active category changes.
     effect(() => {
-      this.loadItems(this.activeCategory());
+      const key = this.activeCategory();
+      const category = this.categories.find((c) => c.key === key);
+      if (category?.type === 'transitions') {
+        this.initTransitionsView();
+      } else if (category?.type === 'permissions') {
+        this.initPermissionsView();
+      } else {
+        this.loadItems(key);
+      }
     });
   }
 
@@ -170,7 +240,7 @@ export class Masterdataconfig {
 
   private loadItems(key: string): void {
     const category = this.categories.find((c) => c.key === key);
-    if (!category) return;
+    if (!category || category.type === 'transitions' || category.type === 'permissions') return;
 
     this.isLoading.set(true);
 
@@ -367,6 +437,393 @@ export class Masterdataconfig {
         this.isRemoving.set(false);
         this.toastr.error(err.error?.detail ?? 'Failed to delete.', 'Error');
       }
+    });
+  }
+
+  // =====================================================================
+  // STATUS TRANSITIONS
+  // =====================================================================
+
+  private edgeKey(from: string, to: string): string {
+    return `${from}||${to}`;
+  }
+
+  /** Loads roles + statuses once (both needed to draw the matrix), then
+   *  loads transitions for whichever role is currently selected — or
+   *  defaults to the first role if none was picked yet. */
+  private initTransitionsView(): void {
+    this.isLoadingTransitions.set(true);
+
+    this.service.getRoles().subscribe({
+      next: (res) => {
+        const roles: RoleOption[] = res.roles ?? [];
+        this.transitionRoles.set(roles);
+
+        if (this.selectedRoleId() == null && roles.length > 0) {
+          this.selectedRoleId.set(roles[0].role_id);
+        }
+
+        this.service.getPlainMasterData('development-status').subscribe({
+          next: (statusRes) => {
+            const statuses: string[] = (statusRes.items ?? []).map((i: MasterDataItem) => i.name);
+            this.transitionStatuses.set(statuses);
+
+            const roleId = this.selectedRoleId();
+            if (roleId != null) {
+              this.loadTransitionsForRole(roleId);
+            } else {
+              this.isLoadingTransitions.set(false);
+            }
+          },
+          error: (err: HttpErrorResponse) => {
+            this.isLoadingTransitions.set(false);
+            this.toastr.error(err.error?.detail ?? 'Failed to load statuses.', 'Error');
+          },
+        });
+      },
+      error: (err: HttpErrorResponse) => {
+        this.isLoadingTransitions.set(false);
+        this.toastr.error(err.error?.detail ?? 'Failed to load roles.', 'Error');
+      },
+    });
+  }
+
+  onRoleSelectChange(roleIdStr: string): void {
+    const roleId = Number(roleIdStr);
+    this.selectedRoleId.set(roleId);
+    this.loadTransitionsForRole(roleId);
+  }
+
+  private loadTransitionsForRole(roleId: number): void {
+    this.isLoadingTransitions.set(true);
+    this.service.getStatusTransitions(roleId).subscribe({
+      next: (res) => {
+        const map = new Map<string, number>();
+        for (const t of res.transitions ?? []) {
+          map.set(this.edgeKey(t.from_status, t.to_status), t.id);
+        }
+        this.transitionEdgeMap.set(map);
+        this.canOverride.set(!!res.canOverride);
+        this.isLoadingTransitions.set(false);
+      },
+      error: (err: HttpErrorResponse) => {
+        this.isLoadingTransitions.set(false);
+        this.toastr.error(err.error?.detail ?? 'Failed to load transitions.', 'Error');
+      },
+    });
+  }
+
+  isEdgeChecked(from: string, to: string): boolean {
+    return this.transitionEdgeMap().has(this.edgeKey(from, to));
+  }
+
+  isEdgePending(from: string, to: string): boolean {
+    return this.pendingEdgeKeys().has(this.edgeKey(from, to));
+  }
+
+  toggleEdge(from: string, to: string, checked: boolean): void {
+    const roleId = this.selectedRoleId();
+    if (roleId == null || from === to) return;
+
+    const key = this.edgeKey(from, to);
+    const pending = new Set(this.pendingEdgeKeys());
+    pending.add(key);
+    this.pendingEdgeKeys.set(pending);
+
+    const done = () => {
+      const p = new Set(this.pendingEdgeKeys());
+      p.delete(key);
+      this.pendingEdgeKeys.set(p);
+    };
+
+    if (checked) {
+      this.service.addStatusTransition({ role_id: roleId, from_status: from, to_status: to }).subscribe({
+        next: (res) => {
+          const map = new Map(this.transitionEdgeMap());
+          map.set(key, res.id);
+          this.transitionEdgeMap.set(map);
+          done();
+        },
+        error: (err: HttpErrorResponse) => {
+          done();
+          this.toastr.error(err.error?.detail ?? 'Failed to add transition.', 'Error');
+        },
+      });
+    } else {
+      const transitionId = this.transitionEdgeMap().get(key);
+      if (transitionId == null) {
+        done();
+        return;
+      }
+      this.service.removeStatusTransition(transitionId).subscribe({
+        next: () => {
+          const map = new Map(this.transitionEdgeMap());
+          map.delete(key);
+          this.transitionEdgeMap.set(map);
+          done();
+        },
+        error: (err: HttpErrorResponse) => {
+          done();
+          this.toastr.error(err.error?.detail ?? 'Failed to remove transition.', 'Error');
+        },
+      });
+    }
+  }
+
+  /** Bound to the checkbox's (change) event. Turning override ON is
+   *  destructive to the role's transition restrictions, so it opens a
+   *  confirm modal instead of calling the API immediately — the checkbox
+   *  itself snaps back to canOverride()'s current value on the next change
+   *  detection cycle since nothing here mutates that signal yet. Turning
+   *  override OFF is safe (never grants access) so it applies right away. */
+  onOverrideCheckboxChange(checked: boolean): void {
+    if (checked) {
+      this.pendingOverrideChange.set(true);
+    } else {
+      this.onOverrideToggle(false);
+    }
+  }
+
+  get pendingOverrideRoleName(): string {
+    const roleId = this.selectedRoleId();
+    return this.transitionRoles().find((r) => r.role_id === roleId)?.role_name ?? 'this role';
+  }
+
+  cancelOverrideChange(): void {
+    this.pendingOverrideChange.set(null);
+  }
+
+  confirmOverrideChange(): void {
+    this.pendingOverrideChange.set(null);
+    this.onOverrideToggle(true);
+  }
+
+  onOverrideToggle(checked: boolean): void {
+    const roleId = this.selectedRoleId();
+    if (roleId == null) return;
+
+    this.isTogglingOverride.set(true);
+    this.service.setRoleOverride(roleId, checked).subscribe({
+      next: () => {
+        this.canOverride.set(checked);
+        this.isTogglingOverride.set(false);
+        this.toastr.success(
+          checked ? 'This role can now set any status.' : 'Override removed for this role.',
+          'Success',
+        );
+      },
+      error: (err: HttpErrorResponse) => {
+        this.isTogglingOverride.set(false);
+        this.toastr.error(err.error?.detail ?? 'Failed to update override.', 'Error');
+      },
+    });
+  }
+
+  // =====================================================================
+  // ROLE PERMISSIONS
+  // =====================================================================
+
+  /** Loads roles once, then loads the full actions/fields/attachments
+   *  matrix for whichever role is currently selected — or defaults to the
+   *  first role if none was picked yet. Mirrors initTransitionsView(). */
+  private initPermissionsView(): void {
+    this.isLoadingPermissions.set(true);
+
+    this.service.getRoles().subscribe({
+      next: (res) => {
+        const roles: RoleOption[] = res.roles ?? [];
+        this.permissionRoles.set(roles);
+
+        if (this.selectedPermRoleId() == null && roles.length > 0) {
+          this.selectedPermRoleId.set(roles[0].role_id);
+        }
+
+        const roleId = this.selectedPermRoleId();
+        if (roleId != null) {
+          this.loadPermissionsForRole(roleId);
+        } else {
+          this.isLoadingPermissions.set(false);
+        }
+      },
+      error: (err: HttpErrorResponse) => {
+        this.isLoadingPermissions.set(false);
+        this.toastr.error(err.error?.detail ?? 'Failed to load roles.', 'Error');
+      },
+    });
+  }
+
+  onPermRoleSelectChange(roleIdStr: string): void {
+    const roleId = Number(roleIdStr);
+    this.selectedPermRoleId.set(roleId);
+    this.loadPermissionsForRole(roleId);
+  }
+
+  private loadPermissionsForRole(roleId: number): void {
+    this.isLoadingPermissions.set(true);
+    this.service.getRolePermissionMatrix(roleId).subscribe({
+      next: (res) => {
+        this.actionPerms.set(res.actions ?? []);
+        this.fieldPerms.set(res.fields ?? []);
+        this.attachmentPerms.set(res.attachments ?? []);
+        this.isLoadingPermissions.set(false);
+      },
+      error: (err: HttpErrorResponse) => {
+        this.isLoadingPermissions.set(false);
+        this.toastr.error(err.error?.detail ?? 'Failed to load permissions.', 'Error');
+      },
+    });
+  }
+
+  private permPendingKey(kind: 'actions' | 'fields' | 'attachments', key: string): string {
+    return `${kind}::${key}`;
+  }
+
+  isPermPending(kind: 'actions' | 'fields' | 'attachments', key: string): boolean {
+    return this.pendingPermKeys().has(this.permPendingKey(kind, key));
+  }
+
+  private setPermPending(kind: 'actions' | 'fields' | 'attachments', key: string, pending: boolean): void {
+    const set = new Set(this.pendingPermKeys());
+    const k = this.permPendingKey(kind, key);
+    if (pending) set.add(k);
+    else set.delete(k);
+    this.pendingPermKeys.set(set);
+  }
+
+  // ---- Actions ----
+
+  toggleActionPermission(row: ActionPermRow, checked: boolean): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('actions', row.permissionKey, true);
+    this.service.setActionPermission(roleId, row.permissionKey, checked).subscribe({
+      next: () => {
+        this.actionPerms.set(
+          this.actionPerms().map((r) =>
+            r.permissionKey === row.permissionKey ? { ...r, isAllowed: checked, isOverridden: true } : r,
+          ),
+        );
+        this.setPermPending('actions', row.permissionKey, false);
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('actions', row.permissionKey, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to update permission.', 'Error');
+      },
+    });
+  }
+
+  resetActionPermission(row: ActionPermRow): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('actions', row.permissionKey, true);
+    this.service.resetActionPermission(roleId, row.permissionKey).subscribe({
+      next: () => {
+        this.actionPerms.set(
+          this.actionPerms().map((r) =>
+            r.permissionKey === row.permissionKey
+              ? { ...r, isAllowed: row.default, isOverridden: false }
+              : r,
+          ),
+        );
+        this.setPermPending('actions', row.permissionKey, false);
+        this.toastr.success('Reset to default.', 'Success');
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('actions', row.permissionKey, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to reset permission.', 'Error');
+      },
+    });
+  }
+
+  // ---- Fields ----
+
+  onFieldAccessChange(row: FieldPermRow, accessLevel: 'edit' | 'view'): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('fields', row.fieldName, true);
+    this.service.setFieldPermission(roleId, row.fieldName, accessLevel).subscribe({
+      next: () => {
+        this.fieldPerms.set(
+          this.fieldPerms().map((r) =>
+            r.fieldName === row.fieldName ? { ...r, accessLevel, isOverridden: true } : r,
+          ),
+        );
+        this.setPermPending('fields', row.fieldName, false);
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('fields', row.fieldName, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to update field permission.', 'Error');
+      },
+    });
+  }
+
+  resetFieldPermission(row: FieldPermRow): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('fields', row.fieldName, true);
+    this.service.resetFieldPermission(roleId, row.fieldName).subscribe({
+      next: () => {
+        this.fieldPerms.set(
+          this.fieldPerms().map((r) =>
+            r.fieldName === row.fieldName ? { ...r, accessLevel: row.default, isOverridden: false } : r,
+          ),
+        );
+        this.setPermPending('fields', row.fieldName, false);
+        this.toastr.success('Reset to default.', 'Success');
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('fields', row.fieldName, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to reset field permission.', 'Error');
+      },
+    });
+  }
+
+  // ---- Attachments ----
+
+  toggleAttachmentPermission(row: AttachmentPermRow, checked: boolean): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('attachments', row.category, true);
+    this.service.setAttachmentPermission(roleId, row.category, checked).subscribe({
+      next: () => {
+        this.attachmentPerms.set(
+          this.attachmentPerms().map((r) =>
+            r.category === row.category ? { ...r, canManage: checked, isOverridden: true } : r,
+          ),
+        );
+        this.setPermPending('attachments', row.category, false);
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('attachments', row.category, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to update attachment permission.', 'Error');
+      },
+    });
+  }
+
+  resetAttachmentPermission(row: AttachmentPermRow): void {
+    const roleId = this.selectedPermRoleId();
+    if (roleId == null) return;
+
+    this.setPermPending('attachments', row.category, true);
+    this.service.resetAttachmentPermission(roleId, row.category).subscribe({
+      next: () => {
+        this.attachmentPerms.set(
+          this.attachmentPerms().map((r) =>
+            r.category === row.category ? { ...r, canManage: row.default, isOverridden: false } : r,
+          ),
+        );
+        this.setPermPending('attachments', row.category, false);
+        this.toastr.success('Reset to default.', 'Success');
+      },
+      error: (err: HttpErrorResponse) => {
+        this.setPermPending('attachments', row.category, false);
+        this.toastr.error(err.error?.detail ?? 'Failed to reset attachment permission.', 'Error');
+      },
     });
   }
 }

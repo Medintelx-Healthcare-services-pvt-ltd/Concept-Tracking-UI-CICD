@@ -369,6 +369,36 @@
   align-items: center;
 }
 
+/* Copy Concept — sits in .page-title-row (which is flex:1 inside
+   .page-header), so margin-left: auto pushes it to the far right of the
+   title row, level with the concept name/status badges. */
+.btn-copy-concept {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-white);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.btn-copy-concept:hover:not(:disabled) {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: #2563eb;
+  color: #2563eb;
+}
+
+.btn-copy-concept:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
 .meta-sep {
   margin: 0 8px;
   color: var(--border);
@@ -617,6 +647,19 @@
   background: #fffbeb;
   border: 1px solid #fde68a;
   border-radius: var(--radius-sm);
+  animation: draft-lock-banner-in 220ms ease-out;
+}
+
+@keyframes draft-lock-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .draft-lock-icon {
@@ -984,6 +1027,25 @@
   box-shadow: 0 0 0 3px rgba(59, 130, 246, .12);
 }
 
+/* Invalid state — same red-border treatment as .select-wrapper.invalid
+   above, just never defined for these two wrapper types even though the
+   template already toggles this same "invalid" class on them (Estimated
+   Volume / Estimated Dollars). Without this, a failed required-field
+   submit correctly shows the toast + *ngIf error text underneath, but the
+   field itself never visibly highlights. :focus-within is placed after
+   this so an actively-focused invalid field still shows the blue focus
+   ring instead of being stuck red while the user is mid-edit. */
+.input-suffix-wrapper.invalid,
+.input-prefix-wrapper.invalid {
+  border-color: #ef4444;
+}
+
+.input-suffix-wrapper.invalid:focus-within,
+.input-prefix-wrapper.invalid:focus-within {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, .12);
+}
+
 .form-input.with-suffix,
 .form-input.with-prefix {
   border: none;
@@ -1256,6 +1318,446 @@
 .step-sub {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* ── Activity History card ── */
+.activity-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+  position: relative;
+}
+
+.activity-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  background: rgba(241, 245, 249, 1);
+  padding: 10px;
+  border-radius: 10px;
+}
+
+.activity-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.activity-header-icons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-history-icon {
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+/* Info icon that opens the dot-color legend popover */
+.activity-legend-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.activity-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.activity-info-btn:hover,
+.activity-info-btn[aria-expanded="true"] {
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563eb;
+}
+
+.activity-legend-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+/* Always in the DOM; visibility is purely CSS-driven so plain :hover
+   works with no JS/state involved. The click toggle (showActivityLegend
+   -> .is-open) is just a fallback for touch devices that can't hover, and
+   lets a mouse user pin it open too.
+
+   `position: fixed` (top/left set inline from the component, see
+   positionActivityLegend()) is used instead of `absolute` on purpose: this
+   popover lives inside .right-panel, which has `overflow-y: auto` — and
+   per spec that also makes overflow-x compute to `auto`, so an
+   absolutely-positioned popover here gets clipped the moment it extends
+   past the panel's own edge. Clipped like that, it reads as "hidden behind
+   the center panel" even though it's really just being cut off by its own
+   scroll container. Fixed positioning anchors it to the viewport instead,
+   so it's immune to that clipping and always paints above the rest of the
+   page (see the elevated z-index below) regardless of DOM order. */
+.activity-legend-popover {
+  position: fixed;
+  z-index: 1200;
+  width: 240px;
+  background: var(--bg-white);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  border: 1px solid var(--border);
+  padding: 10px 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.12s ease-out, transform 0.12s ease-out, visibility 0.12s;
+}
+
+/* Invisible bridge so the popover doesn't close while the pointer moves
+   from the icon down into it. */
+.activity-legend-wrap::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  right: 0;
+  width: 100%;
+  height: 8px;
+}
+
+.activity-legend-wrap:hover .activity-legend-popover,
+.activity-legend-popover.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+/* Clicking the ✕ (or the backdrop) sets showActivityLegend = false, but
+   the pointer is usually still physically over the popover at that
+   instant — and since the popover is a DOM descendant of
+   .activity-legend-wrap, `:hover` on the wrap stays true regardless of
+   the popover's fixed-position screen location. Without this rule the
+   hover selector above would keep the popover visible until the mouse
+   actually left the wrap, making the close button look broken. This
+   higher-specificity rule (two classes vs. one) wins over the hover
+   rule for as long as legend-force-closed is set; it's cleared on
+   mouseleave so hovering the icon again behaves normally. */
+.activity-legend-wrap.legend-force-closed:hover .activity-legend-popover {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px);
+}
+
+.activity-legend-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.activity-legend-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px;
+}
+
+.activity-legend-close:hover {
+  color: var(--text-primary);
+}
+
+.activity-legend-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.activity-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.activity-legend-row .activity-dot,
+.activity-legend-dot {
+  position: static !important;
+  left: auto;
+  top: auto;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.activity-legend-color-name {
+  font-weight: 600;
+  min-width: 46px;
+  display: inline-block;
+}
+
+.activity-legend-arrow {
+  color: var(--text-muted);
+  margin: 0 2px;
+}
+
+.activity-legend-label {
+  line-height: 1.3;
+}
+
+.activity-legend-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 5px 12px;
+}
+
+.activity-loading,
+.activity-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
+.activity-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 20px;
+  position: relative;
+}
+
+.activity-timeline::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: var(--border);
+}
+
+.activity-item {
+  position: relative;
+  margin-bottom: 18px;
+  cursor: pointer;
+}
+
+.activity-item:last-child {
+  margin-bottom: 0;
+}
+
+.activity-dot {
+  position: absolute;
+  left: -20px;
+  top: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot-red {
+  background: #dc2626;
+}
+
+.dot-blue {
+  background: #2563eb;
+}
+
+.dot-green {
+  background: #16a34a;
+}
+
+.dot-yellow {
+  background: #e9df13;
+}
+
+.dot-gray {
+  background: rgb(113, 113, 113)
+}
+
+.dot-purple {
+  background: #9333ea;
+}
+
+.activity-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.activity-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.activity-item-time {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.btn-view-full-history {
+  width: 100%;
+  margin-top: 14px;
+  padding: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.btn-view-full-history:hover {
+  background: rgba(241, 245, 249, 1);
+}
+
+/* ── Activity History detail popup ── */
+.activity-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.activity-modal {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: var(--shadow-card);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.activity-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.activity-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.activity-modal-close {
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  flex-shrink: 0;
+}
+
+.activity-modal-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 13px;
+}
+
+.activity-modal-label {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.activity-modal-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Old value / New value get their own stacked row so long changes don't
+   push the modal taller than the viewport — the value box scrolls
+   internally instead. */
+.activity-modal-row--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.activity-modal-value--scroll {
+  text-align: left;
+  max-height: 100px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+}
+
+.activity-modal-value--scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.activity-modal-value--scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.activity-modal-value--scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.activity-modal-reason-block {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 10px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.activity-modal-reason {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin: 4px 0 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .ownership-header {
@@ -1618,6 +2120,75 @@
 /* ═══════════════════════════════════════════════
    Development Notes
 ═══════════════════════════════════════════════ */
+
+/* Collapsible header — a full-width <button> so the whole row is
+   clickable/keyboard-focusable, not just a small chevron icon.
+   Re-styled to plain/left-aligned since it's a <button> by default.
+   Same padding-bottom/border-bottom in both collapsed and expanded
+   states, so the header doesn't visually shift when toggled. */
+.notes-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0 0 12px 0;
+  margin: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+/* .card-title normally carries its own bottom border/padding — the
+   header button owns that separation instead, so it's switched off
+   here to avoid a doubled-up border under the title text. */
+.notes-card-title {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.notes-card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notes-count-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--blue-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Chevron — same CSS-drawn approach as .select-arrow, so it matches
+   the rest of the app's expand/collapse affordances instead of
+   introducing a new visual language. */
+.notes-chevron {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-right: 1.6px solid var(--text-muted);
+  border-bottom: 1.6px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform .15s ease, border-color .15s ease;
+}
+
+.notes-card-header:hover .notes-chevron {
+  border-color: var(--blue-accent);
+}
+
+.notes-chevron-open {
+  transform: rotate(-135deg);
+}
+
 .notes-list {
   display: flex;
   flex-direction: column;
@@ -1719,32 +2290,95 @@
 
 .note-add-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding-top: 12px;
   /* border-top: 1px solid var(--border); */
+}
+
+/* The avatar is a fixed 36px circle; nudge it down so it stays centered
+   against the textarea's first line instead of hugging the top edge
+   once the textarea grows past one line. */
+.note-add-row .self-avatar {
+  margin-top: 2px;
 }
 
 .self-avatar {
   background: #6366f1;
 }
 
-.note-input {
+/* Wrapper carries the visible pill/rect chrome; overflow:hidden clips
+   the textarea's native scrollbar (which paints as a plain rectangle
+   regardless of border-radius) back to the rounded shape instead of
+   letting it cut through the corner. */
+.note-input-wrap {
   flex: 1;
-  padding: 9px 14px;
   border: 1px solid var(--border);
   border-radius: 20px;
-  font-size: 13px;
-  color: var(--text-primary);
   background: var(--bg-page);
-  outline: none;
-  font-family: var(--font);
-  transition: border-color .15s, box-shadow .15s;
+  overflow: hidden;
+  padding: 5px 7px 2px 2px;
+  transition: border-color .15s, box-shadow .15s, border-radius .15s;
 }
 
-.note-input:focus {
+.note-input-wrap:focus-within {
   border-color: var(--blue-accent);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, .1);
+}
+
+.note-input {
+  display: block;
+  width: 100%;
+  padding: 9px 14px;
+  border: none;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  outline: none;
+  font-family: var(--font);
+  /* Textarea-specific: wrap instead of scrolling horizontally, and grow
+     with content (height is set inline by autoResizeNoteInput()) rather
+     than showing a scrollbar. Capped via max-height below so a very long
+     note still scrolls instead of pushing the page open forever — the
+     wrapper above is what keeps that scrollbar visually contained. */
+  resize: none;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.4;
+  max-height: 160px;
+}
+
+/* Slim, unobtrusive scrollbar for the note textarea (Chrome/Edge/Safari
+   via ::-webkit-*, Firefox via the standard properties) so the little
+   sliver of scroll track reads as intentional rather than a leftover
+   default browser scrollbar. */
+.note-input {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, .18) transparent;
+}
+
+.note-input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.note-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.note-input::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, .18);
+  border-radius: 999px;
+}
+
+.note-input::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, .28);
+}
+
+/* Once the note grows past a single line, square off the pill shape —
+   a fully round 20px radius looks odd on a multi-line block. */
+.note-input-wrap.note-input-multiline {
+  border-radius: 14px;
 }
 
 .note-input::placeholder {
@@ -1754,17 +2388,17 @@
 /* Shown when a submit was blocked because tracked fields/attachments
    changed but no Development Note was entered. Cleared as soon as the
    user starts typing. */
-.note-input-invalid {
+.note-input-wrap.note-input-invalid {
   border-color: #dc2626;
   box-shadow: 0 0 0 3px rgba(220, 38, 38, .12);
 }
 
-.note-input-invalid:focus {
+.note-input-wrap.note-input-invalid:focus-within {
   border-color: #dc2626;
   box-shadow: 0 0 0 3px rgba(220, 38, 38, .18);
 }
 
-.note-input-invalid::placeholder {
+.note-input-wrap.note-input-invalid .note-input::placeholder {
   color: #dc2626;
 }
 
@@ -2027,9 +2661,13 @@
   border-radius: 4px;
   flex-shrink: 0;
   transition: color .15s;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
 }
 
 .attach-remove:hover {
+  border-color: 1px solid var(--border);
   color: #ef4444;
 }
 
@@ -2627,6 +3265,51 @@
 }
 
 /* Keep old submit row */
+
+/* ── SPECS replace-confirmation popup ── */
+.specs-replace-panel {
+  width: 420px;
+}
+
+.specs-replace-body {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+}
+
+.specs-replace-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #fffbeb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.specs-replace-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.specs-replace-text strong {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.specs-replace-footer {
+  gap: 10px;
+}
+
+/* Superseded switch-confirmation reuses the specs-replace popup layout,
+   just swaps the icon chip to an informational blue instead of warning
+   amber, since this follows a successful save rather than a caution. */
+.superseded-switch-icon {
+  background: #eff6ff;
+}
 
 /* Empty state */
 .doc-empty {
