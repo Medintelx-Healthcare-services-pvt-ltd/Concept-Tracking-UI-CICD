@@ -21,7 +21,7 @@ jobs:
       - name: Add Git to PATH
         shell: powershell
         run: |
-          $gitDir = "C\Users\hkasoji\Appata\local\Programs\Git\Cmd"
+          $gitDir = "C:\Users\hkasoji\Appata\local\Programs\Git\Cmd"
           if (Test-Path "$gitDir\git.exe") {
               Add-Content -Path $env:GITHUB_PATH -Value $gitDir 
               Write-Host "Added $gitDir to PATH for remaining steps."
