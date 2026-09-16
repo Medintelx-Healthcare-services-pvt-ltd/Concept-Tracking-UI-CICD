@@ -3,7 +3,9 @@ name: Build and Deploy Angular UI
 on:
   push:
     branches:
+      - main
       - QA
+      - phase-2
   pull_request:
     branches:
       - QA
@@ -16,6 +18,18 @@ jobs:
     runs-on: self-hosted
 
     steps:
+      - name: Add Git to PATH
+        shell: powershell
+        run: |
+          $gitDir = "C:\Users\hkasoji\AppData\local\Programs\Git\Cmd"
+          if (Test-Path "$gitDir\git.exe") {
+              Add-Content -Path $env:GITHUB_PATH -Value $gitDir 
+              Write-Host "Added $gitDir to PATH for remaining steps."
+          } else { 
+          Write-Host "git.exe not found at $gitDir - check the install path." 
+          exit 1 
+          }
+          
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -312,3 +326,4 @@ jobs:
             development environment. Deploy this artifact for UAT - do not use the
             auto-generated "Source code" zip, its version is stale.
           files: ${{ env.RELEASE_ZIP }}
+          
