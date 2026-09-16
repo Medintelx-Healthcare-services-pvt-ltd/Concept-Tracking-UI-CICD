@@ -40,10 +40,24 @@
         </div> -->
 
         <div class="sso-container">
-          <button type="submit" class="sso-btn" [disabled]="isLogin">
-            <img src="Images/right-arrow.png" alt="SSO Icon" class="sso-icon" />
+          <button type="submit" class="sso-btn ms-btn" [disabled]="isLogin">
+            @if (isLogin) {
+              <span class="ms-spinner"></span>
+            } @else {
+              <svg
+                class="sso-icon ms-icon"
+                viewBox="0 0 21 21"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+              >
+                <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+                <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+                <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+                <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+              </svg>
+            }
 
-            {{ isLogin ? 'SIGNING IN...' : 'SIGN IN' }}
+            {{ isLogin ? 'Signing in...' : 'Continue with Microsoft' }}
           </button>
         </div>
       </form>

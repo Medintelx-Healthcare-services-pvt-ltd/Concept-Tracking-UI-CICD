@@ -3,7 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterModule, Router } from '@angular/router';
 import { VERSION } from '../../../environments/version';
-import { Service } from '../../dashboard/service';
+import { Service } from '../../dashboard/service'; 
 import { ToastrService } from 'ngx-toastr';
 
 export interface RoleOption {
@@ -198,7 +198,7 @@ export class LayoutComponent implements OnInit {
   }
   showLogoutPopup = false;
   onLogout(): void {
-    this.showLogoutPopup = true;
+  this.showLogoutPopup = true;
   }
 
   confirmLogout(): void {
@@ -217,5 +217,5 @@ export class LayoutComponent implements OnInit {
   //   console.log('Logout clicked');
   //   this.router.navigate(['/logout']);
   // }
-
+  
 }

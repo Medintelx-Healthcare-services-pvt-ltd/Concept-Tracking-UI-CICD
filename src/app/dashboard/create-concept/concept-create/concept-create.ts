@@ -31,7 +31,7 @@ interface DevNote {
   avatarBg: string;
   time: string;
   text: string;
-  RoleName:string;
+  RoleName: string;
   /** true once this note has actually been saved to the backend (loaded
    *  from the API, or confirmed sent in a previous submit). Only notes
    *  with persisted === false get included in the next submit's
@@ -127,6 +127,24 @@ interface LatestConceptItem {
   DataScienceProgrammerId?: Number;
 }
 
+/** One row from GET /api/concepts/{concept_id}/history, already
+ *  pre-shaped server-side for direct UI binding — see concept_history.py.
+ *  dot_color/title/timestamp drive the collapsed timeline row;
+ *  old_value/new_value/changed_by/role/reason drive the click-through
+ *  detail popup, using the exact same object (no second API call). */
+interface ActivityHistoryItem {
+  activity_id: number;
+  activity_type: string;
+  dot_color: 'red' | 'green' | 'blue' | 'yellow' | 'gray' | 'purple';
+  title: string;
+  timestamp: string;
+  old_value: string;
+  new_value: string;
+  changed_by: string;
+  role: string;
+  reason: string;
+}
+
 interface IdValueOption { id: number; value: string; }
 interface ClientOption { client_id: string; client_name: string; }
 interface MasterConceptOption { master_id: string; concept_name: string; }
@@ -145,20 +163,54 @@ type AttachCategory = 'specs' | 'table' | 'other' | 'approval';
   templateUrl: './concept-create.html',
   styleUrls: ['./concept-create.css']
 })
-export class ConceptCreateComponent implements OnInit, OnDestroy  {
+export class ConceptCreateComponent implements OnInit, OnDestroy {
   @ViewChild('specsInput') specsInputRef!: ElementRef<HTMLInputElement>;
   @ViewChild('tableInput') tableInputRef!: ElementRef<HTMLInputElement>;
   @ViewChild('otherInput') otherInputRef!: ElementRef<HTMLInputElement>;
   @ViewChild('approvalInput') approvalInputRef!: ElementRef<HTMLInputElement>;
-  @ViewChild('fileInput')  fileInput!: ElementRef<HTMLInputElement>;
+  @ViewChild('fileInput') fileInput!: ElementRef<HTMLInputElement>;
   @ViewChild('docFileInput') docFileInputRef!: ElementRef<HTMLInputElement>;
   @ViewChild('notesListRef') notesListRef!: ElementRef<HTMLDivElement>;
   @ViewChild('tabContentRef') tabContentRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('activityLegendWrap') activityLegendWrapRef?: ElementRef<HTMLElement>;
   private pendingDocIndex: number | null = null;
 
   // ── Mode ───────────────────────────────────────────────────────────────
   isEditMode = false;
   pageLoading = false;
+
+  // ── Activity History (right panel card + detail popup) ──────────────────
+  activityHistory: ActivityHistoryItem[] = [];
+  activityHistoryLoading = false;
+  /** Collapsed card shows only the most recent N entries; "View full
+   *  history" flips this to render the complete list in place. */
+  showFullActivityHistory = false;
+  readonly activityHistoryPreviewCount = 4;
+  /** Non-null while the detail popup (Image 2) is open — bound directly
+   *  from whichever ActivityHistoryItem the user clicked, so no second
+   *  request is needed to populate the popup. */
+  selectedActivity: ActivityHistoryItem | null = null;
+  /** Controls the small "what do the dot colors mean?" legend popover
+   *  next to the card header (the ⓘ icon). */
+  showActivityLegend = false;
+  /** Viewport (fixed-position) coordinates for the legend popover, computed
+   *  right before it opens (see positionActivityLegend()). Using `fixed`
+   *  positioning instead of `absolute` means the popover is placed relative
+   *  to the viewport rather than to the scrollable .right-panel, so it can
+   *  no longer be clipped by that panel's overflow, nor visually buried
+   *  under the center panel. */
+  activityLegendPos: { top: number; left: number } = { top: 0, left: 0 };
+  /** True while a copy-concept API call is in flight — disables the Copy
+   *  button and swaps its label so a slow response can't be double-fired. */
+  copyingConcept = false;
+  /** Built entirely from the history response's dot_color_map (see
+   *  loadActivityHistory -> buildActivityDotLegend) — no hardcoded rows
+   *  here, so the legend only ever shows colors/labels the backend has
+   *  actually confirmed, and picks up any future color the backend adds
+   *  without a code change. Empty until that response arrives (e.g. no
+   *  concept loaded yet); the popover shows a "not available yet" line in
+   *  that state instead of a hardcoded row set. */
+  activityDotLegend: { color: string; colorLabel: string; label: string }[] = [];
 
   // The last-PERSISTED Concept Name (set from patchForm() on load/reload),
   // deliberately kept separate from the live form.conceptName value. The
@@ -173,7 +225,7 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
   // conceptId is the STABLE ANCHOR — PK of ConceptKeys/Concepts on the
   // backend, never changes across edits. This is what goes in the route
   // and in every submit's concept_id field.
-  conceptId   = '';
+  conceptId = '';
   // displayConceptId is the version/display id (…_D001 → …_D002 → …_D003,
   // or the finalized production id) — for showing to the user only.
   // NEVER send this back to the backend as concept_id.
@@ -184,16 +236,37 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
   // ── Section completion flags ─────────────────────────────────────────
   // Each one flips to 1 only when its own tab's Submit button is clicked,
   // and is sent to the backend inside `metadata` in submitConcept().
-  developmentCompleted: 0 | 1         = 0;
-  clientApprovalCompleted: 0 | 1      = 0;
+  developmentCompleted: 0 | 1 = 0;
+  clientApprovalCompleted: 0 | 1 = 0;
   supportingDocumentsCompleted: 0 | 1 = 0;
   isDraftConcept = false;
+
+  /** Concept Status card's Client Approval sub-label. `clientApprovalCompleted`
+   *  only tells you the step has been submitted at all — it doesn't say
+   *  whether that submission is sitting with the client, approved, or
+   *  rejected. The actual workflow state lives in the latest
+   *  client_approvals row's ClientApprovalStatus (e.g. "Submitted",
+   *  "Approved", "Rejected") and patchClientApproval() already copies
+   *  that into the clientApprovalStatus form control, so read it from
+   *  there rather than re-deriving a generic yes/no string. Falls back
+   *  to a generic label only if the backend hasn't sent a status yet. */
+  get clientApprovalStatusLabel(): string {
+    const status = (this.form.get('clientApprovalStatus')?.value ?? '').toString().trim();
+    if (status) return status;
+    return this.clientApprovalCompleted ? 'Submitted' : 'Not Submitted';
+  }
 
   /** Shown when the user clicks Client Approval / Supporting Document
    *  while the concept is still a draft. Tells them why the click did
    *  nothing instead of relying on the title tooltip alone. */
   showDraftLockBanner = false;
   private draftLockBannerTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Shown briefly whenever a Production-locked concept loads — same
+   *  flash-in / auto-dismiss pattern as showDraftLockBanner above rather
+   *  than sitting on screen indefinitely. See flashProductionLockBanner(). */
+  showProductionLockBanner = false;
+  private productionLockBannerTimer: ReturnType<typeof setTimeout> | null = null;
 
 
   // ── Navigation ────────────────────────────────────────────────────────
@@ -218,8 +291,8 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
       return false;
     }
 
-    const requestorName  = (item.IdeationRequestor || '').trim().toLowerCase();
-    const requestorid  = (item.IdeationRequestorId || '');
+    const requestorName = (item.IdeationRequestor || '').trim().toLowerCase();
+    const requestorid = (item.IdeationRequestorId || '');
     const programmerName = (item.DataScienceProgrammer || '').trim().toLowerCase();
     const programmerid = (item.DataScienceProgrammerId || '');
 
@@ -238,16 +311,16 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
     if (!q) return list;
     return list.filter(c =>
       c.ConceptName?.toLowerCase().includes(q) ||
-      c.CurrentConceptId?.toLowerCase().includes(q)    ||
+      c.CurrentConceptId?.toLowerCase().includes(q) ||
       c.DevelopmentStatus?.toLowerCase().includes(q)
     );
   }
-  activeTab   = 'development';
+  activeTab = 'development';
 
   tabs: Tab[] = [
     { key: 'development', label: 'Concept Development' },
-    { key: 'approval',    label: 'Client Approval' },
-    { key: 'documents',   label: 'Supporting Document' }
+    { key: 'approval', label: 'Client Approval' },
+    { key: 'documents', label: 'Supporting Document' }
   ];
 
   // ── Form ──────────────────────────────────────────────────────────────
@@ -266,16 +339,16 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
 
   // ── Ownership dropdown ────────────────────────────────────────────────
   showOwnerDropdown = false;
-  ownerSearch       = '';
+  ownerSearch = '';
 
   ownerCandidates: OwnerCandidate[] = [
-    { id: 'p1', name: 'Alice Johnson',  initials: 'AJ', avatarColor: '#6366f1', department: 'Data Science' },
-    { id: 'p2', name: 'Bob Martinez',   initials: 'BM', avatarColor: '#8b5cf6', department: 'Engineering'  },
-    { id: 'p3', name: 'Carol Singh',    initials: 'CS', avatarColor: '#ec4899', department: 'Product'      },
-    { id: 'p4', name: 'David Chen',     initials: 'DC', avatarColor: '#f59e0b', department: 'Analytics'    },
-    { id: 'p5', name: 'Emma Williams',  initials: 'EW', avatarColor: '#10b981', department: 'QA'           },
-    { id: 'p6', name: 'Frank Torres',   initials: 'FT', avatarColor: '#3b82f6', department: 'Data Science' },
-    { id: 'p7', name: 'Grace Kim',      initials: 'GK', avatarColor: '#ef4444', department: 'Engineering'  }
+    { id: 'p1', name: 'Alice Johnson', initials: 'AJ', avatarColor: '#6366f1', department: 'Data Science' },
+    { id: 'p2', name: 'Bob Martinez', initials: 'BM', avatarColor: '#8b5cf6', department: 'Engineering' },
+    { id: 'p3', name: 'Carol Singh', initials: 'CS', avatarColor: '#ec4899', department: 'Product' },
+    { id: 'p4', name: 'David Chen', initials: 'DC', avatarColor: '#f59e0b', department: 'Analytics' },
+    { id: 'p5', name: 'Emma Williams', initials: 'EW', avatarColor: '#10b981', department: 'QA' },
+    { id: 'p6', name: 'Frank Torres', initials: 'FT', avatarColor: '#3b82f6', department: 'Data Science' },
+    { id: 'p7', name: 'Grace Kim', initials: 'GK', avatarColor: '#ef4444', department: 'Engineering' }
   ];
 
   latestConcepts: LatestConceptItem[] = [];
@@ -469,20 +542,20 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
 
   /** User picked a date from the native calendar popup. */
   onDateNativeChange(event: Event, controlName: string): void {
-  if (this.form.get(controlName)?.disabled) return;
-  const input = event.target as HTMLInputElement;
-  const control = this.form.get(controlName);
-  // Clear any leftover invalid-text override from a prior bad manual
-  // entry (e.g. "12/34/5656") — otherwise getDateDisplay() keeps
-  // returning that stale string instead of the newly picked date,
-  // even though the control itself now holds the correct value. This
-  // is why the box looked stuck on the old invalid date while the
-  // correct one was silently going through on submit.
-  delete this.invalidDateText[controlName];
-  control?.markAsDirty();
-  control?.setValue(input.value || '');
-  control?.markAsTouched();
-}
+    if (this.form.get(controlName)?.disabled) return;
+    const input = event.target as HTMLInputElement;
+    const control = this.form.get(controlName);
+    // Clear any leftover invalid-text override from a prior bad manual
+    // entry (e.g. "12/34/5656") — otherwise getDateDisplay() keeps
+    // returning that stale string instead of the newly picked date,
+    // even though the control itself now holds the correct value. This
+    // is why the box looked stuck on the old invalid date while the
+    // correct one was silently going through on submit.
+    delete this.invalidDateText[controlName];
+    control?.markAsDirty();
+    control?.setValue(input.value || '');
+    control?.markAsTouched();
+  }
 
   /** Opens the hidden native <input type="date"> calendar for a given
    *  field. Pass the template reference variable of the hidden input. */
@@ -567,6 +640,39 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
   currentUserRole: string = sessionStorage.getItem('roleName') ?? '';
   // console.log('Current user role id:', this.currentUserRoleId);
 
+  /** True for a Manager login. Used specifically by the Production-lock
+   *  logic below — Manager is the one role allowed to still touch the
+   *  Development Status dropdown once a concept has reached Production. */
+  get isManager(): boolean {
+    return this.currentUserRoleId === ConceptCreateComponent.ROLE_MANAGER;
+  }
+
+  /** The concept's own PERSISTED Development Status, as last returned by
+   *  the backend — set in patchForm() and reset in buildForm(). This is
+   *  deliberately NOT the live (possibly unsaved) value sitting in the
+   *  developmentStatus form control, so that a Manager picking a new
+   *  status from the dropdown doesn't instantly lock/unlock the rest of
+   *  the form out from under them before that change is actually saved. */
+  private currentConceptStatus: string = '';
+
+  /** Once a concept's Development Status is "Production" the record is
+   *  treated as finalized: every field on every tab is force-locked
+   *  read-only for every role. The one exception is Manager, who may
+   *  still change the Development Status dropdown itself (e.g. to move
+   *  it forward/back or correct a mistake) — nothing else. Read by
+   *  applyRoleRestrictions(), applyAllowedStatusFilter(), the
+   *  attachment/notes/approval gates below, and the template. */
+  get isProductionLocked(): boolean {
+    return this.currentConceptStatus === 'Production';
+  }
+
+  get isSupersededLocked(): boolean {
+    return this.currentConceptStatus === 'Superseded';
+  }
+
+  get isRecordLocked(): boolean {
+    return this.isProductionLocked || this.isSupersededLocked;
+  }
   /** Full edit + submit rights. Ideation Requestor, QA, Manager. */
   get canFullEdit(): boolean {
     return [
@@ -585,6 +691,44 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
     return this.canFullEdit || this.canDSEdit;
   }
 
+  /** Gates the Development Notes input specifically. Identical to
+   *  canEdit normally. While Production-locked, notes stay off-limits
+   *  for everyone EXCEPT Manager — a Manager changing the Development
+   *  Status is exactly the case where they'd want to leave a note
+   *  explaining the change, so Manager keeps this one even though every
+   *  other field (attachments, approvals, supporting docs, etc.) stays
+   *  locked. */
+  get canEditNotes(): boolean {
+    if (this.isRecordLocked) return this.isProductionLocked && this.isManager;
+    return this.canEdit;
+  }
+
+  /** Gates the Save-as-Draft / Update buttons specifically. Identical to
+   *  canEdit normally, but while the concept is Production-locked every
+   *  other field is disabled (see applyRoleRestrictions()), so only a
+   *  Manager — saving nothing but their own Development Status change
+   *  (and, per canEditNotes above, an optional note about it) — is
+   *  allowed to still click through. Everyone else loses the button
+   *  entirely once locked, even if their role could otherwise edit. */
+  get canSubmitForm(): boolean {
+    if (this.isRecordLocked) return this.isProductionLocked && this.isManager;
+    return this.canEdit;
+  }
+
+  /** Gates Save-as-Draft and the "Create Concept" submit action
+   *  specifically (as opposed to "Update"). Data Science Programmer
+   *  works existing concepts assigned to them and never originates new
+   *  ones — canCreateConcept already hides the "+ Add New Concept" entry
+   *  point for that role, but this closes the gap for a DS Programmer
+   *  who lands on a blank (not-yet-created) concept form some other way:
+   *  both buttons stay disabled for them until the concept already
+   *  exists (developmentCompleted), at which point "Update" is governed
+   *  by canSubmitForm as normal. */
+  get canSaveOrCreate(): boolean {
+    if (this.canDSEdit && !this.developmentCompleted) return false;
+    return this.canSubmitForm;
+  }
+
   /** Only full-edit roles (Ideation Requestor, QA, Manager) may create a
    *  brand-new concept. Data Science Programmer works existing concepts
    *  assigned to them but doesn't originate new ones, and read-only
@@ -593,8 +737,12 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
     return this.canFullEdit;
   }
 
-  /** Only Manager and full-edit roles may submit Client Approval. */
+  /** Only Manager and full-edit roles may submit Client Approval —
+   *  further gated to nothing at all once the concept is Production-
+   *  locked, Manager included (Manager's only remaining edit right at
+   *  that point is the Development Status dropdown itself). */
   get canSubmitApproval(): boolean {
+    if (this.isRecordLocked) return false;
     return [
       ConceptCreateComponent.ROLE_IDEATION_REQUESTOR,
       ConceptCreateComponent.ROLE_QA,
@@ -609,16 +757,24 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
    *  each labeled "<name> - <role_name>", so a Manager can assign either
    *  role to anyone regardless of which list they originally came from.
    *  Every other role keeps seeing only its own single-role list. */
+  // get ideationRequestorDropdownOptions(): IdeationRequestorOption[] {
+  //   return this.currentUserRoleId === ConceptCreateComponent.ROLE_MANAGER
+  //     ? this.mergeUserOptionLists(this.ideationRequestorOptions, this.dataScienceProgrammerOptions)
+  //     : this.ideationRequestorOptions;
+  // }
   get ideationRequestorDropdownOptions(): IdeationRequestorOption[] {
-    return this.currentUserRoleId === ConceptCreateComponent.ROLE_MANAGER
-      ? this.mergeUserOptionLists(this.ideationRequestorOptions, this.dataScienceProgrammerOptions)
-      : this.ideationRequestorOptions;
+    // Always return only the ideation_requestors list
+    return this.ideationRequestorOptions;
   }
 
+  // get dataScienceProgrammerDropdownOptions(): DataScienceProgrammerOption[] {
+  //   return this.currentUserRoleId === ConceptCreateComponent.ROLE_MANAGER
+  //     ? this.mergeUserOptionLists(this.dataScienceProgrammerOptions, this.ideationRequestorOptions)
+  //     : this.dataScienceProgrammerOptions;
+  // }
   get dataScienceProgrammerDropdownOptions(): DataScienceProgrammerOption[] {
-    return this.currentUserRoleId === ConceptCreateComponent.ROLE_MANAGER
-      ? this.mergeUserOptionLists(this.dataScienceProgrammerOptions, this.ideationRequestorOptions)
-      : this.dataScienceProgrammerOptions;
+    // Always return only the datascience_programmers list
+    return this.dataScienceProgrammerOptions;
   }
 
   /** Combines two option lists into one, de-duplicated by id — primary
@@ -659,7 +815,7 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
    *  the general canEdit. Public so the template can also use it to
    *  hide/disable the relevant buttons, not just block the click. */
   canManageAttachments(cat: AttachCategory): boolean {
-    if (this.isReadOnly) return false;
+    if (this.isReadOnly || this.isRecordLocked) return false;
     return cat === 'approval' ? this.canSubmitApproval : this.canEdit;
   }
 
@@ -671,7 +827,7 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
    *  submit/update this section. Public so the template can also hide/
    *  disable the relevant controls. */
   get canManageSupportingDocs(): boolean {
-    return !this.isReadOnly && this.canFullEdit;
+    return !this.isReadOnly && !this.isRecordLocked && this.canFullEdit;
   }
 
   /** Blocks a file action with a consistent toast and returns whether it
@@ -708,9 +864,9 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
    *  always contains: (a) every status the role may transition TO, plus
    *  (b) the concept's own current status, so the field never renders
    *  blank/invalid for a value the role isn't allowed to move away from. */
-   private lastKnownDevStatus = 'New';
+  private lastKnownDevStatus = 'New';
   private refreshAllowedStatuses(currentStatus: string): void {
-    this.lastKnownDevStatus = currentStatus || 'New';   
+    this.lastKnownDevStatus = currentStatus || 'New';
     const userId = Number(sessionStorage.getItem('userId'));
     const roleName = sessionStorage.getItem('roleName') ?? '';
 
@@ -725,7 +881,34 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
 
     this.service.getAllowedStatuses(userId, currentStatus || 'New', roleName).subscribe({
       next: (res) => {
-        this.allowedStatuses = res?.allowed_next_statuses ?? [];
+        // The API returns allowed_next_statuses as a list of
+        // { id, name } objects (matching developmentStatusOptions'
+        // { id, value } shape), not plain strings — pull out the
+        // name so applyAllowedStatusFilter()'s
+        // allowedStatuses.includes(d.value) string comparison actually
+        // matches instead of silently comparing strings to objects and
+        // never finding anything.
+        const rawStatuses = res?.allowed_next_statuses ?? [];
+        this.allowedStatuses = rawStatuses.map((s: any) =>
+          typeof s === 'string' ? s : (s?.name ?? s?.value ?? '')
+        ).filter((name: string) => !!name);
+
+        // Backend is the source of truth for which statuses require
+        // Estimated Volume / Estimated Dollars — record every status
+        // this response tells us about (current + every reachable next
+        // status) so estimatedFieldsRequired() / updateEstimatedFields
+        // Validators() never have to guess.
+        if (res?.current_status) {
+          this.setStatusRequiresEstimates(res.current_status);
+        }
+        rawStatuses.forEach((s: any) => {
+          if (s && typeof s === 'object') this.setStatusRequiresEstimates(s);
+        });
+
+        // patchForm() may have already set developmentStatus (and fired
+        // updateEstimatedFieldsValidators against the '' default) before
+        // this response landed — re-sync now that the map is populated.
+        this.updateEstimatedFieldsValidators(this.form.get('developmentStatus')?.value);
 
         this.applyAllowedStatusFilter(currentStatus);
       },
@@ -739,31 +922,87 @@ export class ConceptCreateComponent implements OnInit, OnDestroy  {
     });
   }
 
-private applyAllowedStatusFilter(currentStatus: string): void {
-  this.allowedStatusOptions = this.developmentStatusOptions.filter(
-    d =>
-      this.allowedStatuses.includes(d.value) ||
-      d.value === currentStatus
-  );
+  private applyAllowedStatusFilter(currentStatus: string): void {
+    this.allowedStatusOptions = this.developmentStatusOptions.filter(
+      d =>
+        this.allowedStatuses.includes(d.value) ||
+        d.value === currentStatus
+    );
 
-  this.statusLocked = this.allowedStatuses.length === 0;
+    this.statusLocked = this.allowedStatuses.length === 0;
 
-  queueMicrotask(() => {
-    const control = this.form.get('developmentStatus');
+    queueMicrotask(() => {
+      const control = this.form.get('developmentStatus');
 
-    if (this.statusLocked || this.isReadOnly) {
-      control?.disable({ emitEvent: false });
-    } else if (this.canEdit) {
-      control?.enable({ emitEvent: false });
-    }
-  });
-}
+      // Production lock always wins over the normal allowed-transitions
+      // logic below: only Manager keeps this field enabled, and every
+      // other role stays locked out of it regardless of what the backend
+      // says it could otherwise transition to.
+      if (this.isRecordLocked) {
+        if (this.isProductionLocked && this.isManager) {
+          control?.enable({ emitEvent: false });
+        } else {
+          control?.disable({ emitEvent: false });
+        }
+        return;
+      }
+
+      if (this.statusLocked || this.isReadOnly) {
+        control?.disable({ emitEvent: false });
+      } else if (this.canEdit) {
+        control?.enable({ emitEvent: false });
+      }
+    });
+  }
 
   /** Disables form controls the current role is not allowed to edit.
- *  Called after patchForm() so Angular's disable() doesn't get
- *  overwritten by patchValue(). Re-called on resetToNewConcept()
- *  for the create flow. */
+ *  Called after patchForm() and BEFORE lockCoreFields() — see the order
+ *  note in fetchAndApplyConcept() and the reset comment just inside this
+ *  method for why that order matters. Re-called on resetToNewConcept()
+ *  for the create flow (which has no lockCoreFields() call at all, since
+ *  a blank concept has no id yet for those fields to lock against). */
   private applyRoleRestrictions(): void {
+    // ── Reset to a clean, fully-enabled baseline first ─────────────────
+    // This component instance (and its single reactive form) is reused
+    // across concepts (see routeSub in ngOnInit) — patchValue() never
+    // touches a control's enabled/disabled state, only its value. Without
+    // this reset, switching FROM a fully-locked concept (Production /
+    // Superseded / a read-only role's view) TO one a full-edit role
+    // should be able to edit would leave every control still disabled:
+    // e.g. every branch below either explicitly disables specific fields,
+    // or — for canFullEdit roles — does nothing at all, silently relying
+    // on the form already being enabled. That assumption breaks the
+    // moment the concept just before it in the session was locked. Reset
+    // here so every branch below starts from the same known state
+    // regardless of whatever the previously-loaded concept left behind.
+    // (lockCoreFields(), which intentionally stays locked forever once a
+    // concept exists, deliberately runs AFTER this method — see
+    // fetchAndApplyConcept() — so this reset can never undo it.)
+    Object.keys(this.form.controls).forEach(key => {
+      this.form.get(key)?.enable({ emitEvent: false });
+    });
+    this.form.get('confidenceScore')?.enable({ emitEvent: false });
+
+    // ── Production lock ────────────────────────────────────────────────
+    // Once this concept's Development Status is "Production", it's
+    // finalized: every control on the form is disabled for every role.
+    // Manager is the sole exception, and only for the Development Status
+    // dropdown itself — re-enabled explicitly below — so a Manager can
+    // still move the concept off Production or correct a mistake without
+    // being able to touch anything else. This check runs before, and
+    // takes priority over, every other branch in this method.
+    if (this.isRecordLocked) {
+      Object.keys(this.form.controls).forEach(key => {
+        this.form.get(key)?.disable({ emitEvent: false });
+      });
+      this.form.get('confidenceScore')?.disable({ emitEvent: false });
+
+      if (this.isProductionLocked && this.isManager) {
+        this.form.get('developmentStatus')?.enable({ emitEvent: false });
+      }
+      return;
+    }
+
     if (this.isReadOnly) {
       // Disable every control in the form for pure read-only roles.
       Object.keys(this.form.controls).forEach(key => {
@@ -799,11 +1038,12 @@ private applyAllowedStatusFilter(currentStatus: string): void {
       dsLockedFields.forEach(f => this.form.get(f)?.disable({ emitEvent: false }));
 
       // These are the ONLY fields DS Programmer CAN edit — ensure they're
-      // enabled (in case lockCoreFields ran first and over-disabled
-      // something). Development Notes and Attachments are not reactive-form
-      // controls, so they're gated separately (see canManageAttachments()
-      // and the Development Notes input, which is left unrestricted for
-      // any role that isn't pure read-only).
+      // enabled (the reset at the top of this method already did this,
+      // but stating it explicitly keeps this branch self-contained).
+      // Development Notes and Attachments are not reactive-form controls,
+      // so they're gated separately (see canManageAttachments() and the
+      // Development Notes input, which is left unrestricted for any role
+      // that isn't pure read-only).
       const dsEditableFields = [
         'developmentStatus', 'priority',
         'Internalconceptdescription', 'estimatedVolume', 'estimatedDollars',
@@ -824,20 +1064,20 @@ private applyAllowedStatusFilter(currentStatus: string): void {
 
   private originalFieldValues: Record<string, any> = {};
   private readonly watchedFields = [
-  'conceptName',
-  'developmentStatus',
-  'priority',
-  'estimatedVolume',
-  'estimatedDollars',
-  'confidenceScore',   // nested group — handled specially below
-  'qaSchedule',
-  'productionSchedule',
-  'ideationRequestor',
-  'dataScienceProgrammer',
-  'haloNumber',
-  'previousReportId',
-  'Internalconceptdescription',
-];
+    'conceptName',
+    'developmentStatus',
+    'priority',
+    'estimatedVolume',
+    'estimatedDollars',
+    'confidenceScore',   // nested group — handled specially below
+    'qaSchedule',
+    'productionSchedule',
+    'ideationRequestor',
+    'dataScienceProgrammer',
+    'haloNumber',
+    'previousReportId',
+    'Internalconceptdescription',
+  ];
 
   // Attachment categories that live on the Concept Development tab —
   // 'approval' belongs to Client Approval and isn't part of this check.
@@ -960,6 +1200,17 @@ private applyAllowedStatusFilter(currentStatus: string): void {
   // entered, cleared as soon as the user starts typing a note.
   noteInputInvalid = false;
 
+  // Collapsible Development Notes card — collapsed by default so it
+  // doesn't take up vertical space until the user actually wants to
+  // read or add notes. Forced open below (see onSubmit()'s
+  // noteInputInvalid block) whenever the user needs to see something
+  // inside it, e.g. the "Development Note required" validation hint.
+  notesExpanded = false;
+
+  toggleNotesExpanded(): void {
+    this.notesExpanded = !this.notesExpanded;
+  }
+
   /** These two flags exist because Estimated Volume and Estimated Dollars
    *  are the SAME FormControl instances, reused on both the Concept
    *  Development tab and the Client Approval tab (see the requiredFields
@@ -987,6 +1238,37 @@ private applyAllowedStatusFilter(currentStatus: string): void {
    *  state the moment the user starts addressing it. */
   onNoteInputChange(): void {
     if (this.noteInputInvalid) this.noteInputInvalid = false;
+  }
+
+  /** Grows the Development Notes textarea to fit its content (instead of
+   *  scrolling the text sideways like a single-line input), capped by
+   *  the .note-input max-height in CSS so a very long note scrolls
+   *  internally rather than growing forever. Also toggles the
+   *  "multiline" class on the surrounding .note-input-wrap so the
+   *  pill-shaped border relaxes into a standard rounded rect once the
+   *  note wraps past one line. */
+  autoResizeNoteInput(el: HTMLTextAreaElement): void {
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+    el.parentElement?.classList.toggle(
+      'note-input-multiline',
+      el.scrollHeight > el.clientHeight || el.value.includes('\n') || el.scrollHeight > 40
+    );
+  }
+
+  /** Resets the note textarea back to its single-line pill shape —
+   *  called wherever newNoteText is cleared programmatically (after a
+   *  successful save, cancel, etc.) since clearing the model alone
+   *  doesn't shrink an element whose height was set inline by
+   *  autoResizeNoteInput(). */
+  private resetNoteInputHeight(): void {
+    setTimeout(() => {
+      const el = document.querySelector<HTMLTextAreaElement>('.note-input');
+      if (el) {
+        el.style.height = 'auto';
+        el.parentElement?.classList.remove('note-input-multiline');
+      }
+    });
   }
 
   // Logged-in user's display name + initial — used for the "self" avatar
@@ -1062,15 +1344,133 @@ private applyAllowedStatusFilter(currentStatus: string): void {
     return this.attachments.approval.some(f => f.progress < 100);
   }
 
+  // ── Generic delete/clear confirmation popup ─────────────────────────────
+  // Shared "Are you sure?" gate for every destructive delete/remove/clear
+  // action on this page. Opening the popup never performs the action —
+  // the caller hands over the action as a callback, and it only runs if
+  // the user confirms (confirmPendingAction()). Cancelling, closing the
+  // popup, or clicking the backdrop all leave the underlying data
+  // untouched.
+  showConfirmModal = false;
+  confirmModalMessage = '';
+  confirmModalConfirmLabel = 'Delete';
+  private pendingConfirmAction: (() => void) | null = null;
+
+  private openConfirmModal(
+    message: string,
+    action: () => void,
+    confirmLabel: string = 'Delete'
+  ): void {
+    this.confirmModalMessage = message;
+    this.confirmModalConfirmLabel = confirmLabel;
+    this.pendingConfirmAction = action;
+    this.showConfirmModal = true;
+  }
+
+  confirmPendingAction(): void {
+    const action = this.pendingConfirmAction;
+    this.showConfirmModal = false;
+    this.pendingConfirmAction = null;
+    action?.();
+  }
+
+  cancelConfirmModal(): void {
+    this.showConfirmModal = false;
+    this.pendingConfirmAction = null;
+  }
+
+  /** Confirmation wrapper for removeAttachment() — used by the SPECS,
+   *  TABLE, OTHER, and Client Approval attachment cards. */
+  confirmRemoveAttachment(cat: AttachCategory, f: AttachFile): void {
+    this.openConfirmModal(
+      'This will permanently delete this file.',
+      () => { void this.removeAttachment(cat, f); },
+      'Delete'
+    );
+  }
+
+  /** Confirmation wrapper for removeSupportingDoc() — removes the whole
+   *  Supporting Document slot. */
+  confirmRemoveSupportingDoc(index: number): void {
+    this.openConfirmModal(
+      'This will permanently delete this supporting document.',
+      () => { void this.removeSupportingDoc(index); },
+      'Delete'
+    );
+  }
+
+  /** Confirmation wrapper for clearDocFile() — resets a Supporting
+   *  Document slot back to blank without removing the slot itself. */
+  confirmClearDocFile(event: Event, index: number): void {
+    event.stopPropagation();
+    this.openConfirmModal(
+      'This will clear the file, name, and links from this document slot.',
+      () => { this.clearDocFile(event, index); },
+      'Clear'
+    );
+  }
+
+  /** Confirmation wrapper for removeOwner(). */
+  confirmRemoveOwner(id: string): void {
+    this.openConfirmModal(
+      'This will remove this owner from the concept.',
+      () => { this.removeOwner(id); },
+      'Remove'
+    );
+  }
+
+  // ── SPECS replace-confirmation ──────────────────────────────────────────
+  // SPECS only ever holds a single file. Picking a new one while an
+  // existing SPECS file is already attached doesn't swap it silently —
+  // the user has to confirm deactivating the current file first. These
+  // hold the file/entry pending that confirmation.
+  showSpecsReplaceModal = false;
+  private pendingSpecsFile: File | null = null;
+  private pendingSpecsExisting: AttachFile | null = null;
+
+  /** The persisted SPECS file (if any) that was deactivated by a confirmed
+   *  replace but is NOT yet deleted on the backend. New attachments aren't
+   *  actually uploaded until submitConcept() succeeds (see filesToUpload
+   *  there), so deleting the old file any earlier — e.g. right when the
+   *  user confirms the popup — would leave SPECS with zero backend files
+   *  if they refresh or navigate away before hitting Update/Submit. The
+   *  real deleteattachment call only fires from submitConcept() once the
+   *  replacement has actually been saved; see the cleanup block there. */
+  private pendingSpecsDeletion: AttachFile | null = null;
+
+  get pendingSpecsFileName(): string {
+    return this.pendingSpecsFile?.name ?? '';
+  }
+
+  get pendingSpecsExistingName(): string {
+    return this.pendingSpecsExisting?.name ?? '';
+  }
+
+  // ── Superseded → new development cycle switch-confirmation ─────────────
+  // A Manager moving this concept's Development Status from Production to
+  // Superseded locks the current record fully read-only (see
+  // isProductionLocked/isReadOnly) and the backend spins up a brand-new
+  // development cycle in the same response (new_concept_id). Rather than
+  // silently leaving the Manager stranded on the now-locked record, or
+  // silently jumping them away from the save they just made, surface a
+  // confirmation popup: they stay on the (now read-only) superseded
+  // concept until they explicitly choose to switch.
+  showSupersededSwitchModal = false;
+  private pendingSupersededConceptId: string | null = null;
+
+  get pendingSupersededConceptLabel(): string {
+    return this.pendingSupersededConceptId ?? '';
+  }
+
   // ── Upload Modal ──────────────────────────────────────────────────────
-  showUploadModal    = false;
+  showUploadModal = false;
   modalSelectedIndex: number | null = null;
 
   // ── Doc Viewer (Word/Excel/PDF popup) ──────────────────────────────────
-  docViewerVisible  = false;
+  docViewerVisible = false;
   docViewerFileName = '';
-  docViewerFileExt  = '';
-  docViewerLoading  = false;
+  docViewerFileExt = '';
+  docViewerLoading = false;
   docWordHtml: SafeHtml = '';
   docSheets: SheetData[] = [];
   docActiveSheet = 0;
@@ -1101,8 +1501,33 @@ private applyAllowedStatusFilter(currentStatus: string): void {
     private sanitizer: DomSanitizer,
     private route: ActivatedRoute,
     private router: Router
-  ) {}
+  ) {
+    // Captured here, not in ngOnInit: navigating from /concept-create/:id
+    // to /concept-create is a DIFFERENT route config, not just a changed
+    // :id param, so Angular's default reuse strategy tears down this
+    // whole component and constructs a brand-new instance for it rather
+    // than reusing this one — that's exactly why patching `this.form`
+    // synchronously after calling router.navigate() (the old approach)
+    // silently did nothing: it patched the outgoing instance, which was
+    // already on its way out, while an entirely new instance (with its
+    // own fresh `this.form`) is what actually ends up on screen.
+    // router.getCurrentNavigation() is only non-null while a navigation
+    // this component is being constructed FOR is still in flight, so
+    // reading it here — in the constructor of the freshly-created
+    // instance — is the one reliable place to pick up state passed via
+    // router.navigate(..., { state: {...} }) regardless of whether the
+    // instance was reused or recreated. See applyCopiedConcept() for
+    // where this is set, and the routeSub below for where it's consumed.
+    const nav = this.router.getCurrentNavigation();
+    this.pendingCopiedMetadata = (nav?.extras?.state as any)?.copiedConceptMetadata ?? null;
+  }
 
+  /** Metadata from a just-completed Copy Concept action, staged here (via
+   *  router.navigate state — see the constructor) so it survives the
+   *  /concept-create/:id -> /concept-create navigation even if that
+   *  navigation recreates this component. Consumed and cleared by the
+   *  routeSub below the first time it lands on the blank creation route. */
+  private pendingCopiedMetadata: any = null;
 
   private routeSub?: Subscription;
 
@@ -1122,7 +1547,7 @@ private applyAllowedStatusFilter(currentStatus: string): void {
     this.routeSub = this.route.paramMap.subscribe(params => {
       const routeId = params.get('id');
       const queryId = this.route.snapshot.queryParamMap.get('id');
-      const id      = routeId ?? queryId;
+      const id = routeId ?? queryId;
 
       // Angular REUSES this component instance across /concept-create/:id
       // navigations (that's the whole reason routeSub exists) — so any
@@ -1140,7 +1565,7 @@ private applyAllowedStatusFilter(currentStatus: string): void {
 
       if (id) {
         this.isEditMode = true;
-        this.conceptId  = id;
+        this.conceptId = id;
         this.loadConcept(id);
       } else if (!this.canCreateConcept) {
         // Roles without create rights (Data Science Programmer, Viewer,
@@ -1156,6 +1581,15 @@ private applyAllowedStatusFilter(currentStatus: string): void {
       } else {
         this.isEditMode = false;
         this.resetToNewConcept();
+        // Apply a just-copied concept's metadata now that the blank form
+        // it belongs on has actually been (re)built above — see the
+        // constructor for why this can't just be patched directly by
+        // whatever triggered this navigation.
+        if (this.pendingCopiedMetadata) {
+          const metadata = this.pendingCopiedMetadata;
+          this.pendingCopiedMetadata = null;
+          this.applyCopiedMetadataToForm(metadata);
+        }
       }
     });
   }
@@ -1214,18 +1648,28 @@ private applyAllowedStatusFilter(currentStatus: string): void {
   // Used for the initial route-driven load — shows the page-level loading
   // state and always lands on the Development tab.
   private loadConcept(id: string): void {
-  this.pageLoading = true;
-  this.activeTab   = 'development';
-  this.developmentSubmitAttempted = false;
-  this.approvalSubmitAttempted    = false;
-  this.noteInputInvalid = false;
-  this.newNoteText      = '';
-  this.fetchAndApplyConcept(id, () => {
-    this.pageLoading = false;
-    this.scrollActiveConceptIntoView();
-    this.scrollTabContentToTop();
-  }, 'Failed to load concept', /* isConceptSwitch */ true);
-}
+    this.pageLoading = true;
+    this.activeTab = 'development';
+    this.developmentSubmitAttempted = false;
+    this.approvalSubmitAttempted = false;
+    this.noteInputInvalid = false;
+    this.newNoteText = '';
+    this.resetNoteInputHeight();
+    // Genuine concept switch — this component instance is reused across
+    // concepts (see routeSub in ngOnInit / fetchAndApplyConcept), so any
+    // per-concept UI toggle left open on the PREVIOUS concept must not
+    // carry over onto this one. Same reasoning as resetToNewConcept().
+    this.notesExpanded = false;
+    this.showFullActivityHistory = false;
+    this.selectedActivity = null;
+    this.showActivityLegend = false;
+    this.activityDotLegend = [];
+    this.fetchAndApplyConcept(id, () => {
+      this.pageLoading = false;
+      this.scrollActiveConceptIntoView();
+      this.scrollTabContentToTop();
+    }, 'Failed to load concept', /* isConceptSwitch */ true);
+  }
 
   /** Soft-reload: re-fetches this concept from the server and re-patches
    *  every tab in place right after a successful save/update, so the page
@@ -1305,7 +1749,28 @@ private applyAllowedStatusFilter(currentStatus: string): void {
   ): void {
     this.service.getConcept(id).subscribe({
       next: (res) => {
-        const c     = res.concept ?? {};
+        // Stale-response guard: this component instance is reused across
+        // concepts (see routeSub in ngOnInit), and this fetch is not
+        // cancelled if the user navigates away before it resolves. That
+        // race is real, not hypothetical — e.g. submitConcept()'s own
+        // soft-reload of THIS (just-superseded) concept is still in
+        // flight, unawaited, when confirmSwitchToSupersededConcept()
+        // immediately navigates to the newly-created concept and fires a
+        // second, independent fetch for it. If the superseded concept's
+        // response then lands after the new concept's, it would silently
+        // overwrite the page with the old, now-read-only record — which
+        // is exactly the "switches in read-only, but a manual refresh
+        // fixes it" bug this guard prevents. This.conceptId is updated
+        // synchronously by routeSub BEFORE loadConcept()/this fetch ever
+        // fires (and synchronously by submitConcept() for the
+        // same-concept refresh case), so if it no longer matches the id
+        // THIS response is for, something newer has already superseded
+        // this request — discard it instead of patching stale data in.
+        if (id !== this.conceptId) {
+          return;
+        }
+
+        const c = res.concept ?? {};
         const files = res.active_files ?? [];
 
         // Genuine concept switch: this component instance is reused across
@@ -1326,6 +1791,13 @@ private applyAllowedStatusFilter(currentStatus: string): void {
         }
 
         this.patchForm(c);
+        this.snapshotPersistedFieldValues();
+        // Refresh the Activity History card every time concept data is
+        // (re)loaded — both on a genuine concept switch AND on the
+        // soft-refresh path (e.g. right after a Client Approval or
+        // Supporting Documents submit), since those actions generate new
+        // audit rows this same request needs to reflect.
+        this.loadActivityHistory(id);
         // this.cdr.detectChanges();
         if (resnapshotDevelopmentFields) {
           this.snapshotFieldValues();
@@ -1340,8 +1812,14 @@ private applyAllowedStatusFilter(currentStatus: string): void {
           // Update click.
           this.form.get('conceptName')?.markAsPristine();
         }
-        this.lockCoreFields();
+        // Order matters: applyRoleRestrictions() now resets every control
+        // to enabled before applying its own restrictions (see its
+        // comment), so it must run FIRST — otherwise it would immediately
+        // undo lockCoreFields()'s always-on lock (clientName,
+        // masterConceptName, reviewType, claimType, ideationRequestor)
+        // the instant this callback runs.
         this.applyRoleRestrictions();
+        this.lockCoreFields();
         this.refreshAllowedStatuses(c.DevelopmentStatus ?? 'New');
         this.patchMeta(c);
         this.patchAttachments(files);                          // Attachments tab (SPECS / TABLE / OTHER)
@@ -1360,6 +1838,15 @@ private applyAllowedStatusFilter(currentStatus: string): void {
         onDone?.();
       },
       error: (err) => {
+        // Same staleness guard as the success branch above — an error
+        // from a superseded, no-longer-relevant fetch (e.g. the old
+        // concept's soft-reload failing after the user already switched
+        // away) shouldn't surface an error toast for a request nobody's
+        // waiting on anymore, and definitely shouldn't call the NEW
+        // request's onDone (e.g. clearing pageLoading) out of turn.
+        if (id !== this.conceptId) {
+          return;
+        }
         this.toastr.error(errorMessage, 'Error');
         console.error(err);
         onDone?.();
@@ -1381,133 +1868,172 @@ private applyAllowedStatusFilter(currentStatus: string): void {
   private getChangedWatchedFields(): string[] {
     return this.watchedFields.filter(field => {
       const original = this.originalFieldValues[field] ?? '';
-      const current  = field === 'confidenceScore'
+      const current = field === 'confidenceScore'
         ? (this.form.get('confidenceScore.value')?.value ?? '')
         : (this.form.get(field)?.value ?? '');
       return String(current).trim() !== String(original).trim();
     });
   }
+  private lastPersistedFieldValues: Record<string, any> = {};
+
+  private snapshotPersistedFieldValues(): void {
+    this.lastPersistedFieldValues = {};
+    for (const field of this.watchedFields) {
+      if (field === 'confidenceScore') {
+        this.lastPersistedFieldValues[field] = this.form.get('confidenceScore.value')?.value ?? '';
+      } else {
+        this.lastPersistedFieldValues[field] = this.form.get(field)?.value ?? '';
+      }
+    }
+  }
+
+  private getFieldsDifferFromPersisted(): string[] {
+    return this.watchedFields.filter(field => {
+      const persisted = this.lastPersistedFieldValues[field] ?? '';
+      const current = field === 'confidenceScore'
+        ? (this.form.get('confidenceScore.value')?.value ?? '')
+        : (this.form.get(field)?.value ?? '');
+      return String(current).trim() !== String(persisted).trim();
+    });
+  }
 
   private patchForm(c: any): void {
-  // Persisted value as of this load — this is what the Client Approval
-  // tab's clientConceptName is allowed to mirror, not whatever's
-  // currently (possibly unsaved) sitting in the conceptName control.
-  this.savedConceptName = (c.ConceptName ?? '').toString();
+    // Persisted value as of this load — this is what the Client Approval
+    // tab's clientConceptName is allowed to mirror, not whatever's
+    // currently (possibly unsaved) sitting in the conceptName control.
+    this.savedConceptName = (c.ConceptName ?? '').toString();
 
-  this.form.patchValue({
-    conceptName:                c.ConceptName                ?? '',
-    clientName:                 c.ClientId                   ?? '',
-    masterConceptName:          c.MasterConceptId            ?? '',
-    reviewType:                 c.ReviewType                 ?? '',
-    claimType:                  c.ClaimType                  ?? '',
-    Internalconceptdescription: c.InternalConceptDescription ?? '',
-    developmentStatus:          c.DevelopmentStatus          ?? '',
-    priority:                   c.Priority                   ?? '',
-    haloNumber:                 c.HaloNumber                 ?? '',
-    estimatedVolume:            c.EstimatedVolume            ?? '',
-    estimatedDollars:           c.EstimatedDollars           ?? '',
-    previousReportId:           c.PreviousReportId           ?? '',
-    qaSchedule:         c.QASchedule         ? c.QASchedule.split('T')[0]         : '',
-    productionSchedule: c.ProductionSchedule ? c.ProductionSchedule.split('T')[0] : '',
-    ideationRequestor:          c.IdeationRequestorId        ?? '',
-    dataScienceProgrammer:      c.DataScienceProgrammerId    ?? '',
+    // Snapshot the concept's own persisted Development Status — drives
+    // isProductionLocked (see its getter). Must be set before
+    // lockCoreFields()/applyRoleRestrictions() run in fetchAndApplyConcept().
+    this.currentConceptStatus = c.DevelopmentStatus ?? '';
+    if (this.currentConceptStatus === 'Production'|| this.currentConceptStatus === 'Superseded') {
+      this.flashProductionLockBanner();
+    } else {
+      this.dismissProductionLockBanner();
+    }
 
-    // // Client Approval (not present in this payload — keep as-is/blank)
-    // clientConceptName:        c.ClientConceptName        ?? '',
-    // clientConceptDescription: c.ClientConceptDescription ?? '',
-    // clientApprovalStatus:     c.ClientApprovalStatus     ?? '',
-    // submittedToClientOn: c.SubmittedToClientOn ? c.SubmittedToClientOn.split('T')[0] : '',
-    // clientApprovalNotes:      c.ClientApprovalNotes      ?? '',
-  });
+    this.form.patchValue({
+      conceptName: c.ConceptName ?? '',
+      clientName: c.ClientId ?? '',
+      masterConceptName: c.MasterConceptId ?? '',
+      reviewType: c.ReviewType ?? '',
+      claimType: c.ClaimType ?? '',
+      Internalconceptdescription: c.InternalConceptDescription ?? '',
+      developmentStatus: c.DevelopmentStatus ?? '',
+      priority: c.Priority ?? '',
+      haloNumber: c.HaloNumber ?? '',
+      estimatedVolume: c.EstimatedVolume ?? '',
+      estimatedDollars: c.EstimatedDollars ?? '',
+      previousReportId: c.PreviousReportId ?? '',
+      qaSchedule: c.QASchedule ? c.QASchedule.split('T')[0] : '',
+      productionSchedule: c.ProductionSchedule ? c.ProductionSchedule.split('T')[0] : '',
+      ideationRequestor: c.IdeationRequestorId ?? '',
+      dataScienceProgrammer: c.DataScienceProgrammerId ?? '',
 
-  if (c.ConfidenceScore) {
-    this.form.get('confidenceScore.value')?.setValue(c.ConfidenceScore.toLowerCase());
+      // // Client Approval (not present in this payload — keep as-is/blank)
+      // clientConceptName:        c.ClientConceptName        ?? '',
+      // clientConceptDescription: c.ClientConceptDescription ?? '',
+      // clientApprovalStatus:     c.ClientApprovalStatus     ?? '',
+      // submittedToClientOn: c.SubmittedToClientOn ? c.SubmittedToClientOn.split('T')[0] : '',
+      // clientApprovalNotes:      c.ClientApprovalNotes      ?? '',
+    });
+
+    if (c.ConfidenceScore) {
+      this.form.get('confidenceScore.value')?.setValue(c.ConfidenceScore.toLowerCase());
+    }
+
+    // patchValue() above already fires developmentStatus's valueChanges
+    // (which re-runs updateEstimatedFieldsValidators()), but call it
+    // explicitly too so the Estimated Volume/Dollars requiredness is
+    // guaranteed correct for this concept's actual status regardless of
+    // subscription timing/ordering.
+    this.updateEstimatedFieldsValidators(c.DevelopmentStatus ?? 'New');
+
+    // The backend's getConcept response includes IdeationRequestorName /
+    // DataScienceProgrammerName directly on the concept, but the dropdowns
+    // only resolve a display label by matching IdeationRequestorId /
+    // DataScienceProgrammerId against ideationRequestorOptions /
+    // dataScienceProgrammerOptions — separately-loaded master-data lists.
+    // If the assigned person isn't in that list (deactivated, filtered out,
+    // or master data simply hasn't loaded yet), the <select> renders blank
+    // even though the API clearly returned their name. Stash the concept's
+    // own id/name here so ensureAssignedUsersVisible() can (re)inject them
+    // into the options lists — both now, and again once loadMasterData()
+    // resolves, since that call wholesale-replaces these arrays and would
+    // otherwise wipe the fallback entry back out (same race documented on
+    // prefillIdeationRequestor()).
+    this.lastConceptRequestor = c.IdeationRequestorId
+      ? { id: Number(c.IdeationRequestorId), name: c.IdeationRequestorName }
+      : null;
+    this.lastConceptProgrammer = c.DataScienceProgrammerId
+      ? { id: Number(c.DataScienceProgrammerId), name: c.DataScienceProgrammerName }
+      : null;
+    this.ensureAssignedUsersVisible();
   }
 
-  // The backend's getConcept response includes IdeationRequestorName /
-  // DataScienceProgrammerName directly on the concept, but the dropdowns
-  // only resolve a display label by matching IdeationRequestorId /
-  // DataScienceProgrammerId against ideationRequestorOptions /
-  // dataScienceProgrammerOptions — separately-loaded master-data lists.
-  // If the assigned person isn't in that list (deactivated, filtered out,
-  // or master data simply hasn't loaded yet), the <select> renders blank
-  // even though the API clearly returned their name. Stash the concept's
-  // own id/name here so ensureAssignedUsersVisible() can (re)inject them
-  // into the options lists — both now, and again once loadMasterData()
-  // resolves, since that call wholesale-replaces these arrays and would
-  // otherwise wipe the fallback entry back out (same race documented on
-  // prefillIdeationRequestor()).
-  this.lastConceptRequestor  = c.IdeationRequestorId
-    ? { id: Number(c.IdeationRequestorId), name: c.IdeationRequestorName }
-    : null;
-  this.lastConceptProgrammer = c.DataScienceProgrammerId
-    ? { id: Number(c.DataScienceProgrammerId), name: c.DataScienceProgrammerName }
-    : null;
-  this.ensureAssignedUsersVisible();
-}
+  /** Holds the currently-loaded concept's assigned Ideation Requestor /
+   *  Data Science Programmer (id + name straight from getConcept), so they
+   *  can be re-injected into the dropdown options list whenever it's
+   *  (re)loaded — see ensureAssignedUsersVisible(). null when nobody's
+   *  assigned or no concept is loaded (create flow). */
+  private lastConceptRequestor: { id: number; name: string } | null = null;
+  private lastConceptProgrammer: { id: number; name: string } | null = null;
 
-/** Holds the currently-loaded concept's assigned Ideation Requestor /
- *  Data Science Programmer (id + name straight from getConcept), so they
- *  can be re-injected into the dropdown options list whenever it's
- *  (re)loaded — see ensureAssignedUsersVisible(). null when nobody's
- *  assigned or no concept is loaded (create flow). */
-private lastConceptRequestor:  { id: number; name: string } | null = null;
-private lastConceptProgrammer: { id: number; name: string } | null = null;
+  /** Makes sure the loaded concept's assigned Ideation Requestor / Data
+   *  Science Programmer always appear in their dropdowns with the correct
+   *  name, even if they're missing from the master-data options list
+   *  (deactivated, filtered out, or master data hasn't loaded yet). Called
+   *  from patchForm() and again from loadMasterData()'s callback, since
+   *  master data can resolve either before or after the concept does. */
+  private ensureAssignedUsersVisible(): void {
+    if (this.lastConceptRequestor) {
+      this.ensureOptionPresent(
+        this.ideationRequestorOptions,
+        this.lastConceptRequestor.id,
+        this.lastConceptRequestor.name,
+        'Ideation Requestor'
+      );
+    }
+    if (this.lastConceptProgrammer) {
+      this.ensureOptionPresent(
+        this.dataScienceProgrammerOptions,
+        this.lastConceptProgrammer.id,
+        this.lastConceptProgrammer.name,
+        'Data Science Programmer'
+      );
+    }
+  }
 
-/** Makes sure the loaded concept's assigned Ideation Requestor / Data
- *  Science Programmer always appear in their dropdowns with the correct
- *  name, even if they're missing from the master-data options list
- *  (deactivated, filtered out, or master data hasn't loaded yet). Called
- *  from patchForm() and again from loadMasterData()'s callback, since
- *  master data can resolve either before or after the concept does. */
-private ensureAssignedUsersVisible(): void {
-  if (this.lastConceptRequestor) {
-    this.ensureOptionPresent(
-      this.ideationRequestorOptions,
-      this.lastConceptRequestor.id,
-      this.lastConceptRequestor.name,
-      'Ideation Requestor'
-    );
+  /** Adds a { id, name, role_name } entry to a dropdown's options array if
+   *  that id isn't already present — used so a concept's saved Ideation
+   *  Requestor / Data Science Programmer always shows their name, even if
+   *  they're missing from the master-data list the dropdown was populated
+   *  from. No-op when id is falsy/0 (nobody assigned) or already present. */
+  private ensureOptionPresent(
+    options: { id: number; name: string; role_name?: string }[],
+    id: number | null | undefined,
+    name: string | null | undefined,
+    fallbackRole: string
+  ): void {
+    if (!id) return;
+    const exists = options.some(u => Number(u.id) === Number(id));
+    if (!exists) {
+      options.push({ id: Number(id), name: name || `User #${id}`, role_name: fallbackRole });
+    }
   }
-  if (this.lastConceptProgrammer) {
-    this.ensureOptionPresent(
-      this.dataScienceProgrammerOptions,
-      this.lastConceptProgrammer.id,
-      this.lastConceptProgrammer.name,
-      'Data Science Programmer'
-    );
-  }
-}
-
-/** Adds a { id, name, role_name } entry to a dropdown's options array if
- *  that id isn't already present — used so a concept's saved Ideation
- *  Requestor / Data Science Programmer always shows their name, even if
- *  they're missing from the master-data list the dropdown was populated
- *  from. No-op when id is falsy/0 (nobody assigned) or already present. */
-private ensureOptionPresent(
-  options: { id: number; name: string; role_name?: string }[],
-  id: number | null | undefined,
-  name: string | null | undefined,
-  fallbackRole: string
-): void {
-  if (!id) return;
-  const exists = options.some(u => Number(u.id) === Number(id));
-  if (!exists) {
-    options.push({ id: Number(id), name: name || `User #${id}`, role_name: fallbackRole });
-  }
-}
 
   private patchMeta(c: any): void {
     if (c.CreatedDate) this.createdDate = new Date(c.CreatedDate);
     if (c.UpdatedDate) this.updatedDate = new Date(c.UpdatedDate);
 
-    // c.ConceptId is the anchor and should already match this.conceptId —
-    // c.CurrentConceptId is the version/display id, shown but never sent
-    // back to the server as concept_id.
+    if (c.ConceptId) {
+      this.conceptId = c.ConceptId;
+    }
     this.displayConceptId = c.CurrentConceptId ?? this.conceptId;
 
-    this.developmentCompleted         = c.DevelopmentCompleted         ? 1 : 0;
-    this.clientApprovalCompleted      = c.ClientApprovalCompleted      ? 1 : 0;
+    this.developmentCompleted = c.DevelopmentCompleted ? 1 : 0;
+    this.clientApprovalCompleted = c.ClientApprovalCompleted ? 1 : 0;
     this.supportingDocumentsCompleted = c.SupportingDocumentsCompleted ? 1 : 0;
     this.isDraftConcept = !!c.isDraft || c.RecordType === 'DRAFT';
 
@@ -1528,11 +2054,11 @@ private ensureOptionPresent(
         this.attachments[cat] = [
           ...this.attachments[cat],
           {
-            id:          f.AttachmentId ? `att_${f.AttachmentId}` : this.generateAttachId(),
-            name:        f.FileName,
-            size:        f.FileSize ?? 0,
-            progress:    100,
-            file:        new File([], f.FileName),
+            id: f.AttachmentId ? `att_${f.AttachmentId}` : this.generateAttachId(),
+            name: f.FileName,
+            size: f.FileSize ?? 0,
+            progress: 100,
+            file: new File([], f.FileName),
             // GET /api/download-attachment/{attachment_id} — streams the file
             // back with Content-Disposition: inline, so the blob just gets
             // handed to the in-app Word/Excel/PDF viewer (see viewAttachment).
@@ -1551,125 +2077,125 @@ private ensureOptionPresent(
    *  fixed 3-slot layout, so saved docs fill slots in order and any
    *  remaining slots stay blank/ready for upload. */
   private patchSupportingDocs(files: any[]): void {
-  const savedDocs = files
-    .filter(f => (f.AttachmentType ?? '').toLowerCase() === 'supporting_docs')
-    // Sort by DocIndex — the backend's explicit slot-position field for
-    // this doc (0, 1, 2…), set once when the doc is first added to a
-    // slot and never reshuffled by later edits to that same doc. This is
-    // the correct ordering key; AttachmentId (creation order) was used
-    // before and mostly lines up with DocIndex, but isn't guaranteed to
-    // (e.g. after a doc is removed and a new one takes over the freed
-    // slot, the new one gets a fresh/high AttachmentId but keeps the old
-    // slot's DocIndex). Falls back to AttachmentId only if DocIndex is
-    // ever missing from a record. Without a stable sort here, the
-    // backend can return this list re-ordered by last-updated timestamp
-    // — e.g. editing Doc 1's sourceurl makes Doc 1 "most recently
-    // updated" and bumps its position in the response — which is what
-    // made Doc 1 and Doc 2's content appear to swap cards on every
-    // resubmit.
-    .sort((a, b) => (a.DocIndex ?? a.AttachmentId ?? 0) - (b.DocIndex ?? b.AttachmentId ?? 0))
-    .map(f => {
-      // A doc is URL-only when sourceurl is filled but FileSize is 0 (or
-      // the backend stored no real bytes — e.g. the user only pasted a link).
-      const hasRealFile = f.FileSize > 0;
+    const savedDocs = files
+      .filter(f => (f.AttachmentType ?? '').toLowerCase() === 'supporting_docs')
+      // Sort by DocIndex — the backend's explicit slot-position field for
+      // this doc (0, 1, 2…), set once when the doc is first added to a
+      // slot and never reshuffled by later edits to that same doc. This is
+      // the correct ordering key; AttachmentId (creation order) was used
+      // before and mostly lines up with DocIndex, but isn't guaranteed to
+      // (e.g. after a doc is removed and a new one takes over the freed
+      // slot, the new one gets a fresh/high AttachmentId but keeps the old
+      // slot's DocIndex). Falls back to AttachmentId only if DocIndex is
+      // ever missing from a record. Without a stable sort here, the
+      // backend can return this list re-ordered by last-updated timestamp
+      // — e.g. editing Doc 1's sourceurl makes Doc 1 "most recently
+      // updated" and bumps its position in the response — which is what
+      // made Doc 1 and Doc 2's content appear to swap cards on every
+      // resubmit.
+      .sort((a, b) => (a.DocIndex ?? a.AttachmentId ?? 0) - (b.DocIndex ?? b.AttachmentId ?? 0))
+      .map(f => {
+        // A doc is URL-only when sourceurl is filled but FileSize is 0 (or
+        // the backend stored no real bytes — e.g. the user only pasted a link).
+        const hasRealFile = f.FileSize > 0;
 
-      return {
-        name:           f.DocName ?? f.FileName ?? '',
-        sourceurl:      f.sourceurl ?? '',
-        pdfLocation:    '',
-        uploadProgress: hasRealFile ? 100 : 0,
-        // Keep file null for URL-only docs so the UI correctly shows
-        // the link state instead of a false "Uploaded" success banner.
-        file:           hasRealFile
-                          ? new File([], f.FileName)   // placeholder for viewer
-                          : null,
-        downloadUrl:    hasRealFile && f.AttachmentId
-                          ? `api/download-attachment/${f.AttachmentId}`
-                          : undefined,
-        restored:       true,
-        // Reloaded/restored docs (including the soft-reload right after a
-        // successful submit) must NOT show the success banner — it's only
-        // meant to flash for 5s at the moment of a fresh upload, not every
-        // time this list gets rebuilt from the backend afterward.
-        successBannerVisible: false,
-        // Remembered so an unmodified resubmit can still tell the backend
-        // this slot's file is intact — see resolveDocFileMeta() in
-        // onDocSubmit(). Without this, a slot that already has a real
-        // file looks file-less the moment it's saved again without the
-        // user picking a new file.
-        originalFileName: hasRealFile ? f.FileName : undefined,
-        originalFileSize: hasRealFile ? f.FileSize : undefined,
-        // Needed by removeSupportingDoc() to call the delete API — a
-        // restored slot always has a real backend record, even URL-only
-        // ones (they're still a row in active_files).
-        attachmentId: f.AttachmentId ?? undefined,
-        // STABLE slot identity — read straight off the backend record,
-        // NEVER derived from this doc's position in `savedDocs`/the sort
-        // above (which is only for display ordering and can legitimately
-        // reorder relative to raw array position). Falls back to
-        // AttachmentId only for legacy rows that predate this column.
-        docIndex: f.DocIndex ?? f.AttachmentId ?? 0
-      } as SupportingDoc;
-    });
-
-  this.supportingDocs = savedDocs.length > 0
-    ? [...savedDocs]
-    : [this.blankDoc(), this.blankDoc(), this.blankDoc()];
-
-  // Make sure the next brand-new slot's docIndex can never collide with
-  // any DocIndex just restored from the backend (including ones that
-  // belong to docs the user hasn't loaded here, if any exist higher).
-  const maxRestoredIndex = this.supportingDocs.reduce(
-    (max, d) => Math.max(max, d.docIndex ?? -1), -1
-  );
-  this.nextDocIndex = Math.max(this.nextDocIndex, maxRestoredIndex + 1);
-
-  // Snapshot what was just restored so onDocSubmit()'s "did anything
-  // change" guard has a baseline to compare against — this runs on every
-  // (re)load of this tab, including the soft-refresh right after a
-  // successful Supporting Documents submit, so the snapshot always
-  // reflects whatever is currently persisted.
-  this.snapshotSupportingDocs();
-}
-
-/** Serializable signature of the currently-saved-or-saveable Supporting
- *  Documents state (same shape/filter onDocSubmit() sends as validDocs),
- *  used by getSupportingDocsChanged() to detect a no-op resubmit. Keyed by
- *  docIndex (stable slot identity, never array position — see docIndex's
- *  doc comment) and sorted by it, so unrelated reordering in the array
- *  never looks like a change. */
-private originalSupportingDocsSnapshot = '';
-
-private buildSupportingDocsSignature(): string {
-  return JSON.stringify(
-    this.supportingDocs
-      .filter(d => d.file || d.sourceurl?.trim() || d.pdfLocation?.trim())
-      .map(d => {
-        const { fileName, fileSize } = this.resolveDocFileMeta(d);
         return {
-          docIndex: d.docIndex,
-          name: d.name || '',
-          sourceurl: d.sourceurl || '',
-          pdfLocation: d.pdfLocation || '',
-          fileName: fileName || '',
-          fileSize: fileSize || 0,
-        };
-      })
-      .sort((a, b) => a.docIndex - b.docIndex)
-  );
-}
+          name: f.DocName ?? f.FileName ?? '',
+          sourceurl: f.sourceurl ?? '',
+          pdfLocation: '',
+          uploadProgress: hasRealFile ? 100 : 0,
+          // Keep file null for URL-only docs so the UI correctly shows
+          // the link state instead of a false "Uploaded" success banner.
+          file: hasRealFile
+            ? new File([], f.FileName)   // placeholder for viewer
+            : null,
+          downloadUrl: hasRealFile && f.AttachmentId
+            ? `api/download-attachment/${f.AttachmentId}`
+            : undefined,
+          restored: true,
+          // Reloaded/restored docs (including the soft-reload right after a
+          // successful submit) must NOT show the success banner — it's only
+          // meant to flash for 5s at the moment of a fresh upload, not every
+          // time this list gets rebuilt from the backend afterward.
+          successBannerVisible: false,
+          // Remembered so an unmodified resubmit can still tell the backend
+          // this slot's file is intact — see resolveDocFileMeta() in
+          // onDocSubmit(). Without this, a slot that already has a real
+          // file looks file-less the moment it's saved again without the
+          // user picking a new file.
+          originalFileName: hasRealFile ? f.FileName : undefined,
+          originalFileSize: hasRealFile ? f.FileSize : undefined,
+          // Needed by removeSupportingDoc() to call the delete API — a
+          // restored slot always has a real backend record, even URL-only
+          // ones (they're still a row in active_files).
+          attachmentId: f.AttachmentId ?? undefined,
+          // STABLE slot identity — read straight off the backend record,
+          // NEVER derived from this doc's position in `savedDocs`/the sort
+          // above (which is only for display ordering and can legitimately
+          // reorder relative to raw array position). Falls back to
+          // AttachmentId only for legacy rows that predate this column.
+          docIndex: f.DocIndex ?? f.AttachmentId ?? 0
+        } as SupportingDoc;
+      });
 
-private snapshotSupportingDocs(): void {
-  this.originalSupportingDocsSnapshot = this.buildSupportingDocsSignature();
-}
+    this.supportingDocs = savedDocs.length > 0
+      ? [...savedDocs]
+      : [this.blankDoc(), this.blankDoc(), this.blankDoc()];
 
-/** True if the Supporting Documents tab's content differs from what was
- *  last saved/loaded — mirrors getChangedWatchedFields()/getAttachmentsChanged()
- *  but for this tab's own array-backed (not form-backed) state. Used by
- *  onDocSubmit()'s "did anything change" guard. */
-private getSupportingDocsChanged(): boolean {
-  return this.buildSupportingDocsSignature() !== this.originalSupportingDocsSnapshot;
-}
+    // Make sure the next brand-new slot's docIndex can never collide with
+    // any DocIndex just restored from the backend (including ones that
+    // belong to docs the user hasn't loaded here, if any exist higher).
+    const maxRestoredIndex = this.supportingDocs.reduce(
+      (max, d) => Math.max(max, d.docIndex ?? -1), -1
+    );
+    this.nextDocIndex = Math.max(this.nextDocIndex, maxRestoredIndex + 1);
+
+    // Snapshot what was just restored so onDocSubmit()'s "did anything
+    // change" guard has a baseline to compare against — this runs on every
+    // (re)load of this tab, including the soft-refresh right after a
+    // successful Supporting Documents submit, so the snapshot always
+    // reflects whatever is currently persisted.
+    this.snapshotSupportingDocs();
+  }
+
+  /** Serializable signature of the currently-saved-or-saveable Supporting
+   *  Documents state (same shape/filter onDocSubmit() sends as validDocs),
+   *  used by getSupportingDocsChanged() to detect a no-op resubmit. Keyed by
+   *  docIndex (stable slot identity, never array position — see docIndex's
+   *  doc comment) and sorted by it, so unrelated reordering in the array
+   *  never looks like a change. */
+  private originalSupportingDocsSnapshot = '';
+
+  private buildSupportingDocsSignature(): string {
+    return JSON.stringify(
+      this.supportingDocs
+        .filter(d => d.file || d.sourceurl?.trim() || d.pdfLocation?.trim())
+        .map(d => {
+          const { fileName, fileSize } = this.resolveDocFileMeta(d);
+          return {
+            docIndex: d.docIndex,
+            name: d.name || '',
+            sourceurl: d.sourceurl || '',
+            pdfLocation: d.pdfLocation || '',
+            fileName: fileName || '',
+            fileSize: fileSize || 0,
+          };
+        })
+        .sort((a, b) => a.docIndex - b.docIndex)
+    );
+  }
+
+  private snapshotSupportingDocs(): void {
+    this.originalSupportingDocsSnapshot = this.buildSupportingDocsSignature();
+  }
+
+  /** True if the Supporting Documents tab's content differs from what was
+   *  last saved/loaded — mirrors getChangedWatchedFields()/getAttachmentsChanged()
+   *  but for this tab's own array-backed (not form-backed) state. Used by
+   *  onDocSubmit()'s "did anything change" guard. */
+  private getSupportingDocsChanged(): boolean {
+    return this.buildSupportingDocsSignature() !== this.originalSupportingDocsSnapshot;
+  }
 
   // ── Development Notes (from API) ──────────────────────────────────────
   /** TODO: confirm these field names against your actual development_notes
@@ -1678,49 +2204,49 @@ private getSupportingDocsChanged(): boolean {
    *  is a numeric user id, not a name, so we fall back to "User #<id>"
    *  if no display name is supplied). */
   private patchDevNotes(notes: any[]): void {
-  const avatarPalette = [
-    '#6366f1',
-    '#8b5cf6',
-    '#0ea5e9',
-    '#10b981',
-    '#f59e0b',
-    '#ef4444'
-  ];
+    const avatarPalette = [
+      '#6366f1',
+      '#8b5cf6',
+      '#0ea5e9',
+      '#10b981',
+      '#f59e0b',
+      '#ef4444'
+    ];
 
-  const userColorMap = new Map<string, string>();
+    const userColorMap = new Map<string, string>();
 
-  const getAvatarColor = (author: string): string => {
-    if (!userColorMap.has(author)) {
-      const colorIndex = userColorMap.size % avatarPalette.length;
-      userColorMap.set(author, avatarPalette[colorIndex]);
-    }
-    return userColorMap.get(author)!;
-  };
-
-  this.devNotes = (notes ?? []).map((n: any, i: number) => {
-    const author =
-      n.AuthorName ??
-      n.CreatedByName ??
-      n.author ??
-      (n.Createdby ? `User #${n.Createdby}` : 'User');
-
-    const text = n.NoteText ?? n.Note ?? n.text ?? '';
-    const date = n.CreatedDate ?? n.createdDate ?? n.time;
-
-    return {
-      id: n.NoteId ? `note_${n.NoteId}` : `note_${i}_${Date.now()}`,
-      author,
-      initials: author.charAt(0).toUpperCase(),
-      avatarBg: getAvatarColor(author),
-      time: date ?? '',
-      text,
-      RoleName: n.RoleName ?? n.Role ?? '',
-      persisted: true
+    const getAvatarColor = (author: string): string => {
+      if (!userColorMap.has(author)) {
+        const colorIndex = userColorMap.size % avatarPalette.length;
+        userColorMap.set(author, avatarPalette[colorIndex]);
+      }
+      return userColorMap.get(author)!;
     };
-  });
 
-  this.scrollNotesToBottom();
-}
+    this.devNotes = (notes ?? []).map((n: any, i: number) => {
+      const author =
+        n.AuthorName ??
+        n.CreatedByName ??
+        n.author ??
+        (n.Createdby ? `User #${n.Createdby}` : 'User');
+
+      const text = n.NoteText ?? n.Note ?? n.text ?? '';
+      const date = n.CreatedDate ?? n.createdDate ?? n.time;
+
+      return {
+        id: n.NoteId ? `note_${n.NoteId}` : `note_${i}_${Date.now()}`,
+        author,
+        initials: author.charAt(0).toUpperCase(),
+        avatarBg: getAvatarColor(author),
+        time: date ?? '',
+        text,
+        RoleName: n.RoleName ?? n.Role ?? '',
+        persisted: true
+      };
+    });
+
+    this.scrollNotesToBottom();
+  }
 
   private lastSyncedClientEstimated: { volume: any; dollars: any } = { volume: '', dollars: '' };
 
@@ -1745,24 +2271,24 @@ private getSupportingDocsChanged(): boolean {
   ): void {
     const latest = approvals && approvals.length > 0
       ? [...approvals].sort((a, b) =>
-          new Date(b.CreatedDate ?? b.SubmittedDate ?? 0).getTime() -
-          new Date(a.CreatedDate ?? a.SubmittedDate ?? 0).getTime()
-        )[0]
+        new Date(b.CreatedDate ?? b.SubmittedDate ?? 0).getTime() -
+        new Date(a.CreatedDate ?? a.SubmittedDate ?? 0).getTime()
+      )[0]
       : null;
 
     const clientApprovalValues: Record<string, any> = {
-      clientConceptName:        latest?.ClientConceptName        ?? '',
+      clientConceptName: latest?.ClientConceptName ?? '',
       clientConceptDescription: latest?.ClientConceptDescription ?? '',
-      clientApprovalStatus:     latest?.ClientApprovalStatus     ?? '',
+      clientApprovalStatus: latest?.ClientApprovalStatus ?? '',
       submittedToClientOn: latest?.SubmittedToClientOn
         ? latest.SubmittedToClientOn.split('T')[0]
         : '',
-      clientApprovalNotes:      latest?.ClientApprovalNotes      ?? '',
+      clientApprovalNotes: latest?.ClientApprovalNotes ?? '',
       // Prefer a value actually recorded against a client approval
       // submission (in case the backend keeps its own per-approval
       // figure); fall back to the Development tab's currently-saved
       // value for a concept that has no approval submission yet.
-      clientEstimatedVolume:  latest?.EstimatedVolume  ?? developmentEstimated.volume  ?? '',
+      clientEstimatedVolume: latest?.EstimatedVolume ?? developmentEstimated.volume ?? '',
       clientEstimatedDollars: latest?.EstimatedDollars ?? developmentEstimated.dollars ?? ''
     };
 
@@ -1811,7 +2337,7 @@ private getSupportingDocsChanged(): boolean {
       }
     }
     this.lastSyncedClientEstimated = {
-      volume:  this.form.get('clientEstimatedVolume')?.value  ?? '',
+      volume: this.form.get('clientEstimatedVolume')?.value ?? '',
       dollars: this.form.get('clientEstimatedDollars')?.value ?? ''
     };
 
@@ -1833,7 +2359,7 @@ private getSupportingDocsChanged(): boolean {
     // eligible to auto-sync from conceptName going forward.
     const clientNameControl = this.form.get('clientConceptName');
     const conceptNamePersisted = this.savedConceptName.trim();
-    const savedClientName      = (latest?.ClientConceptName ?? '').trim();
+    const savedClientName = (latest?.ClientConceptName ?? '').trim();
     if (savedClientName && savedClientName !== conceptNamePersisted) {
       clientNameControl?.markAsDirty();
     } else {
@@ -1848,15 +2374,15 @@ private getSupportingDocsChanged(): boolean {
     this.service.getmasterdata().subscribe({
       next: (res) => {
         const data = res?.data ?? {};
-        this.developmentStatusOptions     = data.development_status ?? [];
-        this.priorityOptions               = data.priority_status ?? [];
-        this.clientOptions                 = data.clients ?? [];
-        this.masterConceptOptions          = data.master_concepts ?? [];
-        this.reviewTypeOptions             = data.review_types ?? [];
-        this.claimTypeOptions              = data.claim_types ?? [];
-        this.ideationRequestorOptions      = data.ideation_requestors ?? [];
-        this.dataScienceProgrammerOptions  = data.datascience_programmers ?? [];
-        this.clientApprovalstatusOptions    = data.ClientApproval_status ?? [];
+        this.developmentStatusOptions = data.development_status ?? [];
+        this.priorityOptions = data.priority_status ?? [];
+        this.clientOptions = data.clients ?? [];
+        this.masterConceptOptions = data.master_concepts ?? [];
+        this.reviewTypeOptions = data.review_types ?? [];
+        this.claimTypeOptions = data.claim_types ?? [];
+        this.ideationRequestorOptions = data.ideation_requestors ?? [];
+        this.dataScienceProgrammerOptions = data.datascience_programmers ?? [];
+        this.clientApprovalstatusOptions = data.ClientApproval_status ?? [];
         this.masterDataLoading = false;
 
         // Master data (and therefore ideationRequestorOptions) loads
@@ -1897,36 +2423,109 @@ private getSupportingDocsChanged(): boolean {
     });
   }
 
+  /** status name -> requiresEstimates, sourced ENTIRELY from
+   *  GET /api/allowed-statuses (see refreshAllowedStatuses() below).
+   *
+   *  This used to be a hardcoded EARLY_STAGE_STATUSES string array that
+   *  had to be kept in sync BY HAND with status_permissions.py's
+   *  run_stage_validations() (which gates on numeric status id >= 4).
+   *  Those were two independent sources of truth for the exact same
+   *  rule, and they could silently drift — e.g. a new status added to
+   *  the backend that nobody remembered to also add to this array.
+   *  Now the backend computes requires_estimates() once and the
+   *  frontend just reads it off the response; there is nothing here
+   *  left to keep in sync when a status is added or renumbered.
+   *
+   *  '' (no status chosen yet, brand-new concept) defaults to false —
+   *  same as today's "New" behavior — until the first
+   *  /api/allowed-statuses response arrives. */
+  private statusRequiresEstimatesMap: Record<string, boolean> = { '': false };
+
+  private setStatusRequiresEstimates(status: { name?: string; value?: string } & { requiresEstimates: boolean }): void {
+    const name = status?.name ?? (status as any)?.value;
+    if (name) {
+      this.statusRequiresEstimatesMap[name] = !!status.requiresEstimates;
+    }
+  }
+
+  /** Drives the "*" required-mark next to Estimated Volume / Estimated
+   *  Dollars on the Concept Development tab — true once Development
+   *  Status has advanced to "Result Set QA" or beyond (per the backend's
+   *  requires_estimates()), matching updateEstimatedFieldsValidators()
+   *  below so the mark never shows when the field is actually optional
+   *  (and vice versa). */
+  get estimatedFieldsRequired(): boolean {
+    const status = this.form.get('developmentStatus')?.value ?? '';
+    return this.statusRequiresEstimatesMap[status] ?? false;
+  }
+
+  /** Applies/removes the "required" validator on Estimated Volume /
+   *  Estimated Dollars based on where the concept currently sits in
+   *  Development Status, per statusRequiresEstimatesMap above.
+   *  Validators.min(1) stays on either way, so a value that IS entered
+   *  still can't be zero or negative. Called on form build, whenever
+   *  Development Status changes, and again once refreshAllowedStatuses()
+   *  populates the map (see the race note there), so the rule always
+   *  reflects the concept's current status rather than whatever status
+   *  was on the form last, or a stale/default map entry. */
+  private updateEstimatedFieldsValidators(status: string | null | undefined): void {
+    const requiresEstimates = this.statusRequiresEstimatesMap[status ?? ''] ?? false;
+    const validators = requiresEstimates
+      ? [Validators.required, Validators.min(1)]
+      : [Validators.min(1)];
+
+    ['estimatedVolume', 'estimatedDollars'].forEach(name => {
+      const control = this.form.get(name);
+      control?.setValidators(validators);
+      control?.updateValueAndValidity({ emitEvent: false });
+    });
+  }
+
   // ── Form ──────────────────────────────────────────────────────────────
   private buildForm(): void {
+    // A brand-new/blank form is never Production-locked — reset here so
+    // resetToNewConcept() (which calls buildForm()) doesn't carry over a
+    // previously-loaded concept's locked state onto a fresh one.
+    this.currentConceptStatus = '';
+    this.dismissProductionLockBanner();
+
     this.form = this.fb.group({
-      conceptName:           ['', Validators.required],
-      clientName:            ['', Validators.required],
-      masterConceptName:     ['', Validators.required],
-      reviewType:            ['', Validators.required],
-      claimType:             ['', Validators.required],
-      developmentStatus:     [''],
-      priority:              [''],
-      haloNumber:            [''],
-      Internalconceptdescription:           [''],
-      estimatedVolume:       [null, [Validators.required, Validators.min(1)]],
-      estimatedDollars:      ['', [Validators.required, Validators.min(1)]],
-      confidenceScore: this.fb.group({ value: ['medium'] }),
-      ideationRequestor:     [''],
+      conceptName: ['', Validators.required],
+      clientName: ['', Validators.required],
+      masterConceptName: ['', Validators.required],
+      reviewType: ['', Validators.required],
+      claimType: ['', Validators.required],
+      developmentStatus: [''],
+      priority: [''],
+      haloNumber: [''],
+      Internalconceptdescription: [''],
+      estimatedVolume: [null, [Validators.min(1)]],
+      estimatedDollars: ['', [Validators.min(1)]],
+      confidenceScore: this.fb.group({ value: ['low'] }),
+      ideationRequestor: [''],
       dataScienceProgrammer: [''],
-      previousReportId:      [''],
-      qaSchedule:          ['', [ConceptCreateComponent.validDateRange, ConceptCreateComponent.notPastDate]],
-      productionSchedule:  ['', [ConceptCreateComponent.validDateRange, ConceptCreateComponent.notPastDate]],
+      previousReportId: [''],
+      qaSchedule: ['', [ConceptCreateComponent.validDateRange, ConceptCreateComponent.notPastDate]],
+      productionSchedule: ['', [ConceptCreateComponent.validDateRange, ConceptCreateComponent.notPastDate]],
 
 
       // Client Approval
-      clientConceptName:        ['', Validators.required],
+      clientConceptName: ['', Validators.required],
       clientConceptDescription: ['', Validators.required],
-      clientApprovalStatus:     ['', Validators.required],
+      clientApprovalStatus: ['', Validators.required],
       submittedToClientOn: ['', [Validators.required, ConceptCreateComponent.validDateRange, ConceptCreateComponent.notPastDate]],
-      clientApprovalNotes:      ['', Validators.required],
-      clientEstimatedVolume:  [null, [Validators.required, Validators.min(1)]],
+      clientApprovalNotes: ['', Validators.required],
+      clientEstimatedVolume: [null, [Validators.required, Validators.min(1)]],
       clientEstimatedDollars: ['', [Validators.required, Validators.min(1)]]
+    });
+
+    // Start with the correct (optional, since a fresh form has no status
+    // chosen yet -> falls into EARLY_STAGE_STATUSES' '' entry) requiredness,
+    // then keep it in sync any time the user changes Development Status
+    // themselves via the dropdown.
+    this.updateEstimatedFieldsValidators(this.form.get('developmentStatus')?.value);
+    this.form.get('developmentStatus')?.valueChanges.subscribe(status => {
+      this.updateEstimatedFieldsValidators(status);
     });
   }
 
@@ -2000,7 +2599,7 @@ private getSupportingDocsChanged(): boolean {
    *  until the user actually customizes it again. */
   onClientConceptNameBlur(): void {
     const control = this.form.get('clientConceptName');
-    const value   = control?.value?.trim();
+    const value = control?.value?.trim();
     if (!value) {
       control?.setValue(this.savedConceptName, { emitEvent: false });
       control?.markAsPristine();
@@ -2008,24 +2607,24 @@ private getSupportingDocsChanged(): boolean {
   }
 
   onTabChange(key: string): void {
-  // Draft concepts only have the Concept Development tab — clicking
-  // Client Approval or Supporting Document shouldn't switch tabs, it
-  // should explain why, via a dismissible banner instead of leaving the
-  // user to guess from a disabled-looking button.
-  if ((!this.conceptId || this.isDraftConcept) && key !== 'development') {
-    this.flashDraftLockBanner();
-    return;
-  }
+    // Draft concepts only have the Concept Development tab — clicking
+    // Client Approval or Supporting Document shouldn't switch tabs, it
+    // should explain why, via a dismissible banner instead of leaving the
+    // user to guess from a disabled-looking button.
+    if ((!this.conceptId || this.isDraftConcept) && key !== 'development') {
+      this.flashDraftLockBanner();
+      return;
+    }
 
-  this.showDraftLockBanner = false;
-  this.activeTab = key;
-  if (key === 'approval') {
-    // Pre-fill clientConceptName from conceptName if blank,
-    // so the field is never empty when the tab loads.
-    this.ensureClientConceptName();
-    this.cdr.detectChanges();
+    this.showDraftLockBanner = false;
+    this.activeTab = key;
+    if (key === 'approval') {
+      // Pre-fill clientConceptName from conceptName if blank,
+      // so the field is never empty when the tab loads.
+      this.ensureClientConceptName();
+      this.cdr.detectChanges();
+    }
   }
-}
 
   /** Shows the draft-lock banner and auto-dismisses it after a few
    *  seconds. Restarts the timer on repeated clicks so it doesn't
@@ -2049,6 +2648,30 @@ private getSupportingDocsChanged(): boolean {
     }
   }
 
+  /** Shows the Production-lock banner and auto-dismisses it after a few
+   *  seconds — same timed flash-in/out as flashDraftLockBanner() above,
+   *  triggered once when a Production-locked concept finishes loading
+   *  (see patchForm()) rather than staying pinned on screen the whole
+   *  time the tab is open. */
+  private flashProductionLockBanner(): void {
+    this.showProductionLockBanner = true;
+    if (this.productionLockBannerTimer) {
+      clearTimeout(this.productionLockBannerTimer);
+    }
+    this.productionLockBannerTimer = setTimeout(() => {
+      this.showProductionLockBanner = false;
+      this.productionLockBannerTimer = null;
+    }, 6000);
+  }
+
+  dismissProductionLockBanner(): void {
+    this.showProductionLockBanner = false;
+    if (this.productionLockBannerTimer) {
+      clearTimeout(this.productionLockBannerTimer);
+      this.productionLockBannerTimer = null;
+    }
+  }
+
   // ── Confidence Score ──────────────────────────────────────────────────
   /** Confidence Score is outside the Data Science Programmer's allowed
    *  field list (and is fully locked for read-only roles). The toggle
@@ -2056,6 +2679,7 @@ private getSupportingDocsChanged(): boolean {
    *  alone won't stop it — this guard is the actual enforcement point.
    *  Backed up by [disabled] on the buttons themselves (see template). */
   get canEditConfidenceScore(): boolean {
+    if (this.isRecordLocked) return false;
     return this.canFullEdit;
   }
 
@@ -2095,7 +2719,7 @@ private getSupportingDocsChanged(): boolean {
     }
     if (
       (controlName === 'estimatedVolume' || controlName === 'estimatedDollars' ||
-       controlName === 'clientEstimatedVolume' || controlName === 'clientEstimatedDollars') &&
+        controlName === 'clientEstimatedVolume' || controlName === 'clientEstimatedDollars') &&
       Number(value) <= 0
     ) {
       return true;
@@ -2129,6 +2753,12 @@ private getSupportingDocsChanged(): boolean {
       this.form.markAllAsTouched();
     }
   }
+  public get recordLockedMessage(): string {
+    if (this.isSupersededLocked) {
+      return 'This concept is Superseded. No changes can be made.';
+    }
+    return 'This concept is in Production and is locked for editing.';
+  }
 
   async onSubmit(): Promise<void> {
     // Flips the Concept Development tab's own "submit was attempted"
@@ -2137,9 +2767,25 @@ private getSupportingDocsChanged(): boolean {
     // a failed submit here can never leak an error onto Client Approval.
     this.developmentSubmitAttempted = true;
     if (!this.canEdit) {
-    this.toastr.error('You do not have permission to submit concepts.', 'Access Denied');
-    return;
-  }
+      this.toastr.error('You do not have permission to submit concepts.', 'Access Denied');
+      return;
+    }
+    // Safety net behind canSaveOrCreate/the [disabled] binding on the
+    // button — Data Science Programmer never originates a new concept
+    // (only "Update"s existing ones assigned to them), so the "Create
+    // Concept" action stays blocked for that role even if triggered some
+    // other way while the concept doesn't exist yet.
+    if (this.canDSEdit && !this.developmentCompleted) {
+      this.toastr.error('You do not have permission to create a new concept.', 'Access Denied');
+      return;
+    }
+    // Safety net behind canSubmitForm/the [disabled] binding on the
+    // button — once Production-locked, only Manager may still submit
+    // (and only to persist a Development Status change).
+    if (this.isRecordLocked && !(this.isProductionLocked && this.isManager)) {
+      this.toastr.error(this.recordLockedMessage, 'Access Denied');
+      return;
+    }
     // Safety net behind the [disabled] binding on the button itself —
     // blocks the call even if it's triggered some other way (e.g. Enter
     // key) while a file's progress bar hasn't reached 100% yet.
@@ -2171,16 +2817,26 @@ private getSupportingDocsChanged(): boolean {
     // life of the concept, so clearing one of those on an update must
     // still block submission instead of silently saving it blank.
     const requiredFields: { control: string; label: string }[] = [
-      { control: 'conceptName',       label: 'Concept Name' },
-      { control: 'estimatedVolume',   label: 'Estimated Volume' },
-      { control: 'estimatedDollars',  label: 'Estimated Dollars' },
+      { control: 'conceptName', label: 'Concept Name' },
+      // Estimated Volume / Estimated Dollars are only mandatory from
+      // "Result Set QA" onward (see estimatedFieldsRequired /
+      // updateEstimatedFieldsValidators) - checking them here
+      // unconditionally used to block submission of a brand-new
+      // (early-stage) concept even though the reactive validators on
+      // the controls themselves correctly treated them as optional.
+      ...(this.estimatedFieldsRequired
+        ? [
+          { control: 'estimatedVolume', label: 'Estimated Volume' },
+          { control: 'estimatedDollars', label: 'Estimated Dollars' },
+        ]
+        : []),
       ...(!this.conceptId
         ? [
-            { control: 'clientName',        label: 'Client Name' },
-            { control: 'masterConceptName', label: 'Master Concept Name' },
-            { control: 'reviewType',        label: 'Review Type' },
-            { control: 'claimType',         label: 'Claim Type' },
-          ]
+          { control: 'clientName', label: 'Client Name' },
+          { control: 'masterConceptName', label: 'Master Concept Name' },
+          { control: 'reviewType', label: 'Review Type' },
+          { control: 'claimType', label: 'Claim Type' },
+        ]
         : []),
     ];
 
@@ -2188,6 +2844,18 @@ private getSupportingDocsChanged(): boolean {
       const value = this.form.get(f.control)?.value;
       return this.isRequiredFieldMissing(f.control, value);
     });
+
+    // Estimated Volume / Estimated Dollars carry Validators.min(1) on the
+    // control itself regardless of estimatedFieldsRequired (see
+    // buildForm()/updateEstimatedFieldsValidators()), so a value the user
+    // DID type in must still be > 0 even at an early-stage status where
+    // the field is otherwise optional and therefore isn't in
+    // requiredFields above. onSubmit() never checks this.form.valid, so
+    // without this explicit check that min(1) violation is silently
+    // ignored and a 0 gets sent straight to the backend.
+    const invalidEstimates = ['estimatedVolume', 'estimatedDollars'].filter(
+      name => this.form.get(name)?.hasError('min')
+    );
 
     const dateFields = ['qaSchedule', 'productionSchedule', 'submittedToClientOn'];
     const badDate = dateFields.find(f =>
@@ -2205,13 +2873,23 @@ private getSupportingDocsChanged(): boolean {
       return;
     }
 
-    if (missing.length > 0) {
+    if (missing.length > 0 || invalidEstimates.length > 0) {
       // Mark touched so the template's *ngIf error messages light up too
       missing.forEach(f => this.form.get(f.control)?.markAsTouched());
-      this.toastr.error(
-        `Please fill in: ${missing.map(f => f.label).join(', ')}`,
-        'Required fields missing'
-      );
+      invalidEstimates.forEach(name => this.form.get(name)?.markAsTouched());
+
+      const messages: string[] = [];
+      if (missing.length > 0) {
+        messages.push(`Please fill in: ${missing.map(f => f.label).join(', ')}`);
+      }
+      if (invalidEstimates.length > 0) {
+        const labels = invalidEstimates.map(name =>
+          name === 'estimatedVolume' ? 'Estimated Volume' : 'Estimated Dollars'
+        );
+        messages.push(`${labels.join(' and ')} must be greater than 0.`);
+      }
+
+      this.toastr.error(messages.join(' '), 'Invalid form');
       return;
     }
 
@@ -2228,36 +2906,60 @@ private getSupportingDocsChanged(): boolean {
     // isDraftConcept is still true) must NOT require a note — there's
     // nothing to "explain a change" against yet, since the concept was
     // never actually finalized before now.
-    if (this.conceptId && !this.isDraftConcept) {
+        if (this.conceptId && !this.isDraftConcept) {
       const changedFields = this.getChangedWatchedFields();
       const attachmentsChanged = this.getAttachmentsChanged();
       // devNotes can no longer contain an unsaved entry — notes only land
       // in there after a successful save (see submitConcept()). The only
       // place a not-yet-saved note can be is the input itself.
-      const hasNewNote    = this.newNoteText.trim().length > 0;
+      const hasNewNote = this.newNoteText.trim().length > 0;
       // conceptName is deliberately left out of watchedFields (see its
       // declaration) since editing it alone doesn't require a Development
       // Note. It still counts as a real edit for the "did anything change
       // at all" check below, though.
       const conceptNameChanged = !!this.form.get('conceptName')?.dirty;
 
+      // Fields that differ from what's ACTUALLY persisted on the backend
+      // right now (see lastPersistedFieldValues's doc comment) — catches
+      // Client Approval having silently written a new value into a shared
+      // field (estimatedVolume/estimatedDollars) and the user then editing
+      // that field on the Development tab, INCLUDING clearing it back to
+      // whatever the frozen originalFieldValues baseline still remembers.
+      // getChangedWatchedFields() alone misses that case entirely, since
+      // the cleared value matches the stale baseline even though it no
+      // longer matches what's persisted.
+      const fieldsDifferingFromPersisted = this.getFieldsDifferFromPersisted();
+
+      // Union of both signals — a field counts as "changed" for BOTH the
+      // no-op guard and the Development Note requirement if it differs
+      // from the last Development-tab save OR from what's currently
+      // persisted.
+      const effectiveChangedFields = Array.from(
+        new Set([...changedFields, ...fieldsDifferingFromPersisted])
+      );
+
       // Nothing on this tab was actually touched — updating would just
       // write back exactly what's already saved. Block it instead of
       // hitting the backend for a no-op save with a false "updated
       // successfully" toast.
-      if (!conceptNameChanged && changedFields.length === 0 && !attachmentsChanged && !hasNewNote) {
+      if (!conceptNameChanged && effectiveChangedFields.length === 0 && !attachmentsChanged && !hasNewNote) {
         this.toastr.info('No changes to update.', 'Nothing to Save');
         return;
       }
 
-      if ((changedFields.length > 0 || attachmentsChanged) && !hasNewNote) {
+      if ((effectiveChangedFields.length > 0 || attachmentsChanged) && !hasNewNote) {
         this.noteInputInvalid = true;
+        // The note input lives inside the collapsible Development Notes
+        // body — force it open before focusing, or the input (and the
+        // red-outline/hint that explain why the submit was blocked)
+        // would be invisible behind a collapsed card.
+        this.notesExpanded = true;
         this.toastr.error(
           'You have changed tracked fields. Please add a Development Note explaining the changes before Updating.',
           'Development Note Required'
         );
         // Scroll note input into view so the user knows exactly what to fill
-        document.querySelector<HTMLElement>('.note-input')?.focus();
+        setTimeout(() => document.querySelector<HTMLElement>('.note-input')?.focus());
         return;
       }
     }
@@ -2277,9 +2979,21 @@ private getSupportingDocsChanged(): boolean {
    *  distinguish a draft save from a final submission. */
   async onSaveAsDraft(): Promise<void> {
     if (!this.canEdit) {
-    this.toastr.error('You do not have permission to save drafts.', 'Access Denied');
-    return;
-  }
+      this.toastr.error('You do not have permission to save drafts.', 'Access Denied');
+      return;
+    }
+    // Safety net behind canSaveOrCreate/the [disabled] binding on the
+    // button — Data Science Programmer never originates a new concept,
+    // so Save-as-Draft stays blocked for that role even if triggered
+    // some other way (e.g. Enter key) while it's still just a draft.
+    if (this.canDSEdit && !this.developmentCompleted) {
+      this.toastr.error('You do not have permission to save drafts.', 'Access Denied');
+      return;
+    }
+    if (this.isRecordLocked && !(this.isProductionLocked && this.isManager)) {
+      this.toastr.error(this.recordLockedMessage, 'Access Denied');
+      return;
+    }
     if (this.isAttachmentUploading) {
       this.toastr.error('Please wait for all files to finish uploading.', 'Upload in progress');
       return;
@@ -2299,10 +3013,10 @@ private getSupportingDocsChanged(): boolean {
     // but these four must still be filled in before the very first save.
     if (!this.conceptId) {
       const draftRequiredFields: { control: string; label: string }[] = [
-        { control: 'clientName',        label: 'Client Name' },
+        { control: 'clientName', label: 'Client Name' },
         { control: 'masterConceptName', label: 'Master Concept Name' },
-        { control: 'reviewType',        label: 'Review Type' },
-        { control: 'claimType',         label: 'Claim Type' },
+        { control: 'reviewType', label: 'Review Type' },
+        { control: 'claimType', label: 'Claim Type' },
       ];
       const missingDraftFields = draftRequiredFields.filter(f => {
         const value = this.form.get(f.control)?.value;
@@ -2340,6 +3054,10 @@ private getSupportingDocsChanged(): boolean {
   }
 
   /** Shared upload pipeline used by both onSubmit and onSaveAsDraft.
+   *  @param isDraft when true, sends isDraft: 1 in the metadata payload
+   *  and skips upload entirely if there are no files at all (drafts may
+   *  have nothing attached yet). */
+    /** Shared upload pipeline used by both onSubmit and onSaveAsDraft.
    *  @param isDraft when true, sends isDraft: 1 in the metadata payload
    *  and skips upload entirely if there are no files at all (drafts may
    *  have nothing attached yet). */
@@ -2385,12 +3103,12 @@ private getSupportingDocsChanged(): boolean {
 
     try {
       const user_id = Number(sessionStorage.getItem('userId'));
-      const clientId   = this.form.get('clientName')?.value;
-      const masterId   = this.form.get('masterConceptName')?.value;
+      const clientId = this.form.get('clientName')?.value;
+      const masterId = this.form.get('masterConceptName')?.value;
       const reviewType = this.form.get('reviewType')?.value;
-      const claimType  = this.form.get('claimType')?.value;
+      const claimType = this.form.get('claimType')?.value;
 
-      const clientName        = this.clientOptions.find(c => c.client_id === clientId)?.client_id ?? '';
+      const clientName = this.clientOptions.find(c => c.client_id === clientId)?.client_id ?? '';
       const masterConceptName = this.masterConceptOptions.find(m => m.master_id === masterId)?.master_id ?? '';
 
       // The note input is never optimistically added to devNotes anymore —
@@ -2414,28 +3132,28 @@ private getSupportingDocsChanged(): boolean {
         // Identifies which concept to update. Empty/omitted on the very
         // first submit (no concept exists yet) — the backend treats that
         // as a create. Every submit after that is an update against this id.
-        concept_id:                 this.conceptId || undefined,
-        conceptName:                this.form.get('conceptName')?.value,
+        concept_id: this.conceptId || undefined,
+        conceptName: this.form.get('conceptName')?.value,
         InternalConceptDescription: this.form.get('Internalconceptdescription')?.value,
-        developmentStatus:          effectiveDevStatus,
-        priority:                   this.form.get('priority')?.value,
-        haloNumber:                 this.numericOrNull(this.form.get('haloNumber')?.value),
+        developmentStatus: effectiveDevStatus,
+        priority: this.form.get('priority')?.value,
+        haloNumber: this.numericOrNull(this.form.get('haloNumber')?.value),
         developmentNotes,
-        estimatedVolume:            this.numericOrNull(this.form.get('estimatedVolume')?.value),
-        estimatedDollars:           this.numericOrNull(this.form.get('estimatedDollars')?.value),
-        confidenceScore:            this.form.get('confidenceScore.value')?.value,
-        previousReportId:           this.form.get('previousReportId')?.value,
-        qaSchedule:                 this.form.get('qaSchedule')?.value,
-        productionSchedule:         this.form.get('productionSchedule')?.value,
-        ideationRequestor:          this.form.get('ideationRequestor')?.value,
-        dataScienceProgrammer:      this.form.get('dataScienceProgrammer')?.value,
+        estimatedVolume: this.numericOrNull(this.form.get('estimatedVolume')?.value),
+        estimatedDollars: this.numericOrNull(this.form.get('estimatedDollars')?.value),
+        confidenceScore: this.form.get('confidenceScore.value')?.value,
+        previousReportId: this.form.get('previousReportId')?.value,
+        qaSchedule: this.form.get('qaSchedule')?.value,
+        productionSchedule: this.form.get('productionSchedule')?.value,
+        ideationRequestor: this.form.get('ideationRequestor')?.value,
+        dataScienceProgrammer: this.form.get('dataScienceProgrammer')?.value,
         // A real (non-draft) submit IS the act of completing the
         // Development tab, so it must be sent as 1 in this very request —
         // not read off `this.developmentCompleted`, which is still 0 at
         // this point on the very first ("Create Concept") submit and only
         // gets flipped to 1 further down *after* this request is built.
-        DevelopmentCompleted:         isDraft ? this.developmentCompleted : 1,
-        ClientApprovalCompleted:      this.clientApprovalCompleted,
+        DevelopmentCompleted: isDraft ? this.developmentCompleted : 1,
+        ClientApprovalCompleted: this.clientApprovalCompleted,
         SupportingDocumentsCompleted: this.supportingDocumentsCompleted,
       };
 
@@ -2445,10 +3163,10 @@ private getSupportingDocsChanged(): boolean {
       // the backend already has them tied to concept_id, so they're left
       // out of the payload entirely instead of being resent unchanged.
       if (!this.conceptId) {
-        metadata.clientName        = clientName;
+        metadata.clientName = clientName;
         metadata.masterConceptName = masterConceptName;
-        metadata.reviewType        = reviewType;
-        metadata.claimType         = claimType;
+        metadata.reviewType = reviewType;
+        metadata.claimType = claimType;
       }
       const metadataJson = JSON.stringify(metadata);
       const categories: AttachCategory[] = ['specs', 'table', 'other'];
@@ -2474,12 +3192,12 @@ private getSupportingDocsChanged(): boolean {
       // chunk) like before. Files are told apart on the backend side by
       // the parallel 'categories' array, matched by position to 'files'.
       const formData = new FormData();
-      formData.append('user_id',    user_id.toString());
-      formData.append('metadata',   metadataJson);
+      formData.append('user_id', user_id.toString());
+      formData.append('metadata', metadataJson);
       formData.append('concept_id', this.conceptId || '');
 
       filesToUpload.forEach(({ cat, entry }) => {
-        formData.append('files',      entry.file, entry.file.name);
+        formData.append('files', entry.file, entry.file.name);
         formData.append('categories', cat);
         formData.append('file_names', entry.file.name);
         formData.append('file_sizes', entry.file.size.toString());
@@ -2491,6 +3209,21 @@ private getSupportingDocsChanged(): boolean {
         return;
       }
       this.captureNewConceptId(res);
+
+      // Backend's explicit signal for a Development -> Production
+      // transition (see moved_to_production in create_concept.py) — used
+      // below to give this milestone its own toast instead of the
+      // generic "updated"/"version created" ones, and to suppress those
+      // so a single save never fires two overlapping toasts.
+      const backendStatusMessage: string | null = res?.status_message ?? null;
+
+      // Backend's explicit signal for a Production -> Superseded
+      // transition: the current concept just went fully read-only and a
+      // new development cycle was created alongside it. Captured now so
+      // it can drive the switch-confirmation popup once the current
+      // record's own save feedback (toast + soft-reload below) has run.
+      const supersededNewConceptId: string | null = res?.new_concept_id ?? null;
+
       if (!isDraft && effectiveDevStatus !== formDevStatus) {
         // Covers a brand-new concept's first submit, and the
         // draft-with-no-status → main conversion: the backend was just
@@ -2498,13 +3231,16 @@ private getSupportingDocsChanged(): boolean {
         // sync the form/status dropdown to match what was actually
         // persisted.
         this.form.get('developmentStatus')?.setValue(effectiveDevStatus, { emitEvent: false });
+        this.updateEstimatedFieldsValidators(effectiveDevStatus);
         this.refreshAllowedStatuses(effectiveDevStatus);
       }
       // Surface the version bump to the user — the backend is expected to
       // report version_updated: false on the draft -> main conversion
       // submit (see the isDraftConversion flag sent above), so this toast
       // naturally stops firing for that case without any extra guard here.
-      if (res?.version_updated && res?.current_concept_id) {
+      // Also skipped when movedToProduction, which gets its own more
+      // specific toast further down instead.
+      if (res?.version_updated && res?.current_concept_id && !backendStatusMessage) {
         this.toastr.info(
           `New version created: ${res.current_concept_id}`,
           'Version Updated'
@@ -2515,8 +3251,39 @@ private getSupportingDocsChanged(): boolean {
       // request has succeeded (no per-chunk progress to track anymore).
       filesToUpload.forEach(({ entry }) => { entry.progress = 100; });
 
+      // A SPECS replace staged via confirmSpecsReplace() only deletes the
+      // old file's backend record now — after the replacement has just
+      // been persisted above. Deleting it any earlier (e.g. at confirm
+      // time) could leave SPECS with zero files server-side if this save
+      // never completed. Best-effort: if this cleanup call fails, the new
+      // file is already safely saved, so just warn instead of rolling
+      // anything back.
+      if (this.pendingSpecsDeletion) {
+        const staleAttachmentId = this.pendingSpecsDeletion.attachmentId;
+        this.pendingSpecsDeletion = null;
+        if (staleAttachmentId) {
+          try {
+            const cleanupForm = new FormData();
+            cleanupForm.append('concept_id', this.conceptId);
+            cleanupForm.append('attachment_id', staleAttachmentId.toString());
+            cleanupForm.append('category', 'specs');
+            cleanupForm.append('user_id', user_id.toString());
+            await this.service.deleteattachment(cleanupForm).toPromise();
+          } catch (err: any) {
+            const msg = err?.error?.detail || err?.error?.message || err?.message
+              || 'The replaced SPECS file was saved, but the old file could not be removed from storage.';
+            this.toastr.error(msg, 'Cleanup Warning');
+          }
+        }
+      }
+
       if (isDraft) {
         this.toastr.success('Draft saved successfully!', 'Success');
+      } else if (backendStatusMessage) {
+        // Distinct, explicit confirmation for this milestone — checked
+        // before the create/update branch below so it always wins, even
+        // in the unlikely case both are somehow true for the same save.
+        this.toastr.success(backendStatusMessage, 'Success');
       } else {
         this.toastr.success(
           (wasCreatingNew || wasDraftConversion)
@@ -2537,13 +3304,14 @@ private getSupportingDocsChanged(): boolean {
       // as duplicates on the next Update.
       this.devNotes = this.devNotes.map(n => ({ ...n, persisted: true }));
       if (pendingNote) {
-          this.devNotes = [...this.devNotes, {
-            id: `n${Date.now()}`, author: this.currentUserName, initials: this.currentUserInitial,
-            avatarBg: '#6366f1', time: new Date().toISOString(), text: pendingNote,
-            RoleName: sessionStorage.getItem('roleName') ?? '',
-            persisted: true
-          }];
+        this.devNotes = [...this.devNotes, {
+          id: `n${Date.now()}`, author: this.currentUserName, initials: this.currentUserInitial,
+          avatarBg: '#6366f1', time: new Date().toISOString(), text: pendingNote,
+          RoleName: sessionStorage.getItem('roleName') ?? '',
+          persisted: true
+        }];
         this.newNoteText = '';
+        this.resetNoteInputHeight();
         this.scrollNotesToBottom();
       }
 
@@ -2575,11 +3343,22 @@ private getSupportingDocsChanged(): boolean {
         // legitimately satisfied (or didn't need) that requirement.
         this.refreshConceptData(this.conceptId, /* resnapshotDevelopmentFields */ true);
       }
+
+      // This save is what just superseded the concept — it's now fully
+      // read-only (see isProductionLocked/isReadOnly), so instead of
+      // leaving the Manager sitting on a locked record, ask whether to
+      // jump straight into the new development cycle the backend just
+      // spun up. Deliberately opt-in rather than automatic: they may
+      // still want to review the now-superseded record first.
+      if (supersededNewConceptId) {
+        this.pendingSupersededConceptId = supersededNewConceptId;
+        this.showSupersededSwitchModal = true;
+      }
     } catch (err: any) {
       const errorMsg =
-        err?.error?.detail  ||
+        err?.error?.detail ||
         err?.error?.message ||
-        err?.message        ||
+        err?.message ||
         'Upload failed. Please try again.';
       this.toastr.error(this.friendlyErrorMessage(errorMsg), 'Error');
     } finally {
@@ -2596,16 +3375,32 @@ private getSupportingDocsChanged(): boolean {
    *  the same session (e.g. switching tabs and hitting Submit again)
    *  updates that same concept instead of creating a duplicate.
    *  NOTE: adjust the field names below to match your actual API response shape. */
+  // private captureNewConceptId(res: any): void {
+  //   // res.concept_id is the stable anchor and should never change once set
+  //   // — only capture it the first time (on genuine create). res.current_concept_id
+  //   // is the version/display id and DOES change on every update, so it's
+  //   // always safe (and necessary) to refresh displayConceptId here.
+  //   const anchorId = res?.concept_id ?? res?.ConceptId ?? res?.data?.ConceptId ?? res?.concept?.ConceptId;
+  //   const currentId = res?.current_concept_id ?? res?.CurrentConceptId ?? anchorId;
+
+  //   if (!this.conceptId && anchorId) {
+  //     this.conceptId = anchorId;
+  //     this.isEditMode = true;
+  //     this.lockCoreFields();
+  //   }
+  //   if (currentId) {
+  //     this.displayConceptId = currentId;
+  //   }
+  // }
   private captureNewConceptId(res: any): void {
-    // res.concept_id is the stable anchor and should never change once set
-    // — only capture it the first time (on genuine create). res.current_concept_id
-    // is the version/display id and DOES change on every update, so it's
-    // always safe (and necessary) to refresh displayConceptId here.
     const anchorId = res?.concept_id ?? res?.ConceptId ?? res?.data?.ConceptId ?? res?.concept?.ConceptId;
     const currentId = res?.current_concept_id ?? res?.CurrentConceptId ?? anchorId;
 
-    if (!this.conceptId && anchorId) {
-      this.conceptId  = anchorId;
+    const wasEmpty = !this.conceptId;
+    if (anchorId) {
+      this.conceptId = anchorId;       // always resync, not just when empty
+    }
+    if (wasEmpty && anchorId) {
       this.isEditMode = true;
       this.lockCoreFields();
     }
@@ -2613,7 +3408,6 @@ private getSupportingDocsChanged(): boolean {
       this.displayConceptId = currentId;
     }
   }
-
   /** Client Name, Master Concept Name, Review Type, and Claim Type are
    *  set once at creation and shouldn't change afterward — lock them
    *  (view-only) as soon as the concept exists, whether that's a
@@ -2621,7 +3415,20 @@ private getSupportingDocsChanged(): boolean {
    *  record. submitConcept() separately checks isEditMode/conceptId to
    *  stop resending these in the update payload — see there. */
   private lockCoreFields(): void {
-    ['clientName', 'masterConceptName', 'reviewType', 'claimType'].forEach(name => {
+    const fieldsToLock = ['clientName', 'masterConceptName', 'reviewType', 'claimType'];
+
+    // Ideation Requestor may only be reassigned by a Manager once the
+    // concept has been created. Every other role — including the
+    // Ideation Requestor who originated it and QA (the DS Programmer is
+    // already locked out of this field separately, in
+    // applyRoleRestrictions()) — sees it locked read-only from here on.
+    // Managers are excluded from the lock so they retain the ability to
+    // reassign it.
+    if (this.currentUserRoleId !== ConceptCreateComponent.ROLE_MANAGER) {
+      fieldsToLock.push('ideationRequestor');
+    }
+
+    fieldsToLock.forEach(name => {
       this.form.get(name)?.disable({ emitEvent: false });
     });
   }
@@ -2640,72 +3447,238 @@ private getSupportingDocsChanged(): boolean {
     // instead of depending on that route change firing.
     this.resetToNewConcept();
 
-  if (this.router.url !== '/concept-create') {
-    this.router.navigate(['/concept-create']);
+    if (this.router.url !== '/concept-create') {
+      this.router.navigate(['/concept-create']);
+    }
   }
-}
+
+  // ── Copy concept ──────────────────────────────────────────────────────
+  /** Entry point for the Copy button — validates, then gates the actual
+   *  copy behind the shared "Are you sure?" confirmation popup (see
+   *  openConfirmModal() above) so a stray/misclick doesn't immediately
+   *  spawn a new concept. performCopyConcept() only runs if the user
+   *  confirms. */
+  onCopyConcept(): void {
+    if (!this.canCreateConcept) {
+      this.toastr.error('You do not have permission to create a new concept.', 'Access Denied');
+      return;
+    }
+    // Nothing loaded yet (blank creation form) — nothing to copy.
+    if (!this.conceptId || this.copyingConcept) return;
+
+    this.openConfirmModal(
+      `This will create a new concept pre-filled from ${this.displayConceptId || this.conceptId}. You'll still need to review and complete it before it's saved.`,
+      () => this.performCopyConcept(),
+      'Copy'
+    );
+  }
+
+  /** Copies the currently-loaded concept into a brand-new, unsaved one.
+   *  Hits POST copy-concept with this concept's id, then lands the user on
+   *  the blank "new concept" form pre-filled from the response — same
+   *  destination as "+ Add New Concept", just not blank. The user still
+   *  has to fill in Client/Master Concept/Review/Claim Type (the endpoint
+   *  doesn't return them) and hit Create to actually persist it; nothing
+   *  is saved by the copy call itself. Only ever called after the user
+   *  confirms via onCopyConcept()'s popup. */
+  private performCopyConcept(): void {
+    this.copyingConcept = true;
+    this.service.copyConcept(this.conceptId).subscribe({
+      next: (res: any) => {
+        this.copyingConcept = false;
+        if (!res?.success) {
+          this.toastr.error('Failed to copy concept.', 'Copy Failed');
+          return;
+        }
+        this.applyCopiedConcept(res);
+        this.toastr.success('Review the details and click Create to save it.', 'Concept Copied');
+      },
+      error: (err) => {
+        this.copyingConcept = false;
+        console.error('Failed to copy concept:', err);
+        this.toastr.error('Failed to copy concept.', 'Copy Failed');
+      }
+    });
+  }
+
+  /** Kicks off landing the copy-concept response onto a fresh "new
+   *  concept" form.
+   *
+   *  This can't just reset -> patch -> navigate (the previous approach):
+   *  navigating from /concept-create/:id to /concept-create is a
+   *  different route config, not a changed :id param on the same one, so
+   *  Angular's default reuse strategy destroys this component and
+   *  constructs a brand-new instance for the destination route rather
+   *  than reusing this one. Patching `this.form` before/after calling
+   *  router.navigate() was patching THIS (outgoing, soon-to-be-destroyed)
+   *  instance either way — the new instance that actually renders has its
+   *  own fresh `this.form` that was never touched, which is why the copied
+   *  data silently never appeared.
+   *
+   *  Fix: pass the metadata through router.navigate()'s `state` extra
+   *  instead of touching `this.form` at all here. That state travels with
+   *  the navigation itself (not with this component instance), so the
+   *  new instance's constructor can pick it up via
+   *  router.getCurrentNavigation() regardless of whether it's a fresh
+   *  instance or a reused one, and its routeSub applies it once the blank
+   *  form actually exists to receive it — see the constructor and
+   *  routeSub in ngOnInit, and applyCopiedMetadataToForm() below. */
+  private applyCopiedConcept(res: any): void {
+    const metadata = res.metadata ?? {};
+
+    if (this.router.url !== '/concept-create') {
+      this.router.navigate(['/concept-create'], { state: { copiedConceptMetadata: metadata } });
+    } else {
+      // Already sitting on the blank creation route (shouldn't normally
+      // happen — the Copy button only shows once a real concept with an
+      // id is loaded — but handled for safety). The route isn't changing,
+      // so neither the constructor's getCurrentNavigation() read nor
+      // routeSub will fire for it; reset and apply directly instead.
+      this.resetToNewConcept();
+      this.applyCopiedMetadataToForm(metadata);
+    }
+  }
+
+  /** Patches a copy-concept response's metadata onto the current
+   *  `this.form` — called only once that form is confirmed to belong to
+   *  the blank "new concept" page it's meant for (see applyCopiedConcept()
+   *  and the routeSub in ngOnInit). */
+  private applyCopiedMetadataToForm(m: any): void {
+    // conceptName arrives as a single-item array (["Mesh-10"]) from this
+    // endpoint rather than a plain string like every other field here —
+    // unwrap it defensively either way in case that ever changes.
+    const conceptName = Array.isArray(m.conceptName)
+      ? (m.conceptName[0] ?? '')
+      : (m.conceptName ?? '');
+
+    this.form.patchValue({
+      conceptName,
+      priority: m.priority ?? '',
+      haloNumber: m.haloNumber ?? '',
+      Internalconceptdescription: m.InternalConceptDescription ?? '',
+      developmentStatus: m.developmentStatus ?? '',
+      estimatedVolume: m.estimatedVolume ?? '',
+      estimatedDollars: m.estimatedDollars ?? '',
+      previousReportId: m.previousReportId ?? '',
+      qaSchedule: m.qaSchedule ? m.qaSchedule.split('T')[0] : '',
+      productionSchedule: m.productionSchedule ? m.productionSchedule.split('T')[0] : '',
+      ideationRequestor: m.ideationRequestor ?? '',
+      dataScienceProgrammer: m.dataScienceProgrammer ?? '',
+      // clientName / masterConceptName / reviewType / claimType are
+      // deliberately left blank — copy-concept doesn't return them, and
+      // they're required fields the user must (re)confirm for the new
+      // concept, same as any fresh creation.
+    });
+
+    if (m.confidenceScore !== undefined && m.confidenceScore !== null && m.confidenceScore !== '') {
+      this.form.get('confidenceScore.value')?.setValue(this.confidenceScoreToBucket(m.confidenceScore));
+    }
+
+    this.updateEstimatedFieldsValidators(m.developmentStatus ?? 'New');
+
+    // A fresh copy has nothing saved yet, so nothing here should read as
+    // an unsaved edit.
+    this.form.markAsPristine();
+    this.form.markAsUntouched();
+  }
+
+  /** The Confidence Score control only ever stores 'low' | 'medium' | 'high'
+   *  (see setConfidenceScore()/the toggle buttons) — but copy-concept sends
+   *  a raw 0–100 score ("95") instead of one of those words. Buckets it the
+   *  same way the UI's three-way toggle implies. NOTE: the >=85 / >=50
+   *  thresholds below are a reasonable guess, not a confirmed business
+   *  rule — adjust if the backend has an official cutoff for this. */
+  private confidenceScoreToBucket(raw: string | number): 'low' | 'medium' | 'high' {
+    const word = String(raw).trim().toLowerCase();
+    if (word === 'low' || word === 'medium' || word === 'high') return word;
+
+    const n = Number(raw);
+    if (!isNaN(n)) {
+      if (n >= 85) return 'high';
+      if (n >= 50) return 'medium';
+      return 'low';
+    }
+    return 'low';
+  }
 
   private resetToNewConcept(): void {
-  // Same reasoning as the routeSub fix above — resetToNewConcept() can
-  // also be called directly (onAddNewConcept, when already sitting on
-  // /concept-create with no id, where the route doesn't actually change
-  // and routeSub never fires) — so it needs its own clear, not just a
-  // reliance on the routeSub subscriber.
-  this.dismissDraftLockBanner();
-  this.isEditMode  = false;
-  this.isDraftConcept = false;
-  this.buildForm();
-  this.conceptId   = '';
-  this.displayConceptId = '';
-  this.savedConceptName = '';
-  this.createdDate = new Date();
-  this.updatedDate = new Date();
-  this.uploadedFiles = [];
-  this.owners        = [];
-  this.devNotes      = [];
-  this.newNoteText   = '';
-  // See the matching comment in loadConcept() — a blocked Update on the
-  // previous concept can leave this true, and it must not carry over
-  // onto a brand-new, untouched concept.
-  this.noteInputInvalid = false;
-  // A fresh/new concept has no assigned Ideation Requestor / DS Programmer
-  // of its own — clear the previous concept's stashed fallback so it
-  // doesn't leak into this blank form (see ensureAssignedUsersVisible()).
-  this.lastConceptRequestor  = null;
-  this.lastConceptProgrammer = null;
-  this.attachments   = { specs: [], table: [], other: [], approval: [] };
-  this.originalAttachmentIds = { specs: new Set(), table: new Set(), other: new Set(), approval: new Set() };
-  this.activeTab     = 'development';
-  this.developmentCompleted         = 0;
-  this.clientApprovalCompleted      = 0;
-  this.supportingDocumentsCompleted = 0;
-  // Clear the "submit was attempted" flags too — otherwise the brand-new
-  // form's blank (and therefore required-invalid) estimatedVolume /
-  // estimatedDollars controls immediately show red validation errors on
-  // this fresh page, even though the user hasn't touched them here. These
-  // flags were left true by the submit that just succeeded and produced
-  // this new-concept form in the first place; they must not carry over.
-  this.developmentSubmitAttempted = false;
-  this.approvalSubmitAttempted    = false;
-  // Brand-new concept — no prior DocIndex values exist for it, so the
-  // allocator can safely restart from 0.
-  this.nextDocIndex = 0;
-  this.supportingDocs = [
-    this.blankDoc(),
-    this.blankDoc(),
-    this.blankDoc()
-  ];
-  this.applyRoleRestrictions();
-  this.refreshAllowedStatuses('New');
-  // loadMasterData() only runs once per page load (see ngOnInit), so on a
-  // create -> save -> create-again cycle the options list is already
-  // populated by the time we land back here — try the auto-fill
-  // immediately. If the options aren't loaded yet (very first load of a
-  // brand-new concept), loadMasterData()'s callback retries this once
-  // they arrive.
-  this.prefillIdeationRequestor();
-  this.scrollTabContentToTop();
-}
+    // Same reasoning as the routeSub fix above — resetToNewConcept() can
+    // also be called directly (onAddNewConcept, when already sitting on
+    // /concept-create with no id, where the route doesn't actually change
+    // and routeSub never fires) — so it needs its own clear, not just a
+    // reliance on the routeSub subscriber.
+    this.dismissDraftLockBanner();
+    this.isEditMode = false;
+    this.isDraftConcept = false;
+    this.buildForm();
+    this.conceptId = '';
+    this.displayConceptId = '';
+    this.savedConceptName = '';
+    this.createdDate = new Date();
+    this.updatedDate = new Date();
+    this.uploadedFiles = [];
+    this.owners = [];
+    this.devNotes = [];
+    this.newNoteText = '';
+    this.resetNoteInputHeight();
+    // See the matching comment in loadConcept() — a blocked Update on the
+    // previous concept can leave this true, and it must not carry over
+    // onto a brand-new, untouched concept.
+    this.noteInputInvalid = false;
+    // Same reasoning — a forced-open card from a blocked Update on the
+    // previous concept shouldn't carry over onto a brand-new one either.
+    this.notesExpanded = false;
+    // A fresh/new concept has no assigned Ideation Requestor / DS Programmer
+    // of its own — clear the previous concept's stashed fallback so it
+    // doesn't leak into this blank form (see ensureAssignedUsersVisible()).
+    this.lastConceptRequestor = null;
+    this.lastConceptProgrammer = null;
+    this.attachments = { specs: [], table: [], other: [], approval: [] };
+    this.originalAttachmentIds = { specs: new Set(), table: new Set(), other: new Set(), approval: new Set() };
+    // Clear the previous concept's audit trail too — a brand-new concept
+    // has no history of its own, and without this the "Activity history"
+    // card keeps showing the last-loaded concept's entries (and a stale
+    // selectedActivity popup could still be open from it).
+    this.activityHistory = [];
+    this.activityHistoryLoading = false;
+    this.showFullActivityHistory = false;
+    this.selectedActivity = null;
+    this.showActivityLegend = false;
+    // Same reasoning — the previous concept's dot-color legend (built from
+    // ITS dot_color_map response) has no business showing on a brand-new
+    // concept that hasn't loaded any history of its own yet.
+    this.activityDotLegend = [];
+    this.activeTab = 'development';
+    this.developmentCompleted = 0;
+    this.clientApprovalCompleted = 0;
+    this.supportingDocumentsCompleted = 0;
+    // Clear the "submit was attempted" flags too — otherwise the brand-new
+    // form's blank (and therefore required-invalid) estimatedVolume /
+    // estimatedDollars controls immediately show red validation errors on
+    // this fresh page, even though the user hasn't touched them here. These
+    // flags were left true by the submit that just succeeded and produced
+    // this new-concept form in the first place; they must not carry over.
+    this.developmentSubmitAttempted = false;
+    this.approvalSubmitAttempted = false;
+    // Brand-new concept — no prior DocIndex values exist for it, so the
+    // allocator can safely restart from 0.
+    this.nextDocIndex = 0;
+    this.supportingDocs = [
+      this.blankDoc(),
+      this.blankDoc(),
+      this.blankDoc()
+    ];
+    this.applyRoleRestrictions();
+    this.refreshAllowedStatuses('New');
+    // loadMasterData() only runs once per page load (see ngOnInit), so on a
+    // create -> save -> create-again cycle the options list is already
+    // populated by the time we land back here — try the auto-fill
+    // immediately. If the options aren't loaded yet (very first load of a
+    // brand-new concept), loadMasterData()'s callback retries this once
+    // they arrive.
+    this.prefillIdeationRequestor();
+    this.scrollTabContentToTop();
+  }
 
   /** Auto-fills "Ideation Requestor" with the logged-in user's own entry
    *  when creating a brand-new concept — but ONLY for roles who can
@@ -2782,74 +3755,86 @@ private getSupportingDocsChanged(): boolean {
 
   private readonly allowedExtensions = ['pdf', 'doc', 'docx', 'xls', 'xlsx'];
 
-private isValidFile(file: File): boolean {
-  const extension = file.name.split('.').pop()?.toLowerCase() || '';
-  return this.allowedExtensions.includes(extension);
-}
+  private isValidFile(file: File): boolean {
+    const extension = file.name.split('.').pop()?.toLowerCase() || '';
+    return this.allowedExtensions.includes(extension);
+  }
 
-onAttachSelected(event: Event, cat: AttachCategory): void {
-  if (this.blockIfCannotManage(cat)) return;
+  onAttachSelected(event: Event, cat: AttachCategory): void {
+    if (this.blockIfCannotManage(cat)) return;
 
-  const input = event.target as HTMLInputElement;
-  if (!input.files) return;
+    const input = event.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
 
-  const duplicateNames: string[] = [];
-  const invalidFiles: string[] = [];
-
-  Array.from(input.files).forEach(file => {
-
-    // Validate file type
-    if (!this.isValidFile(file)) {
-      invalidFiles.push(file.name);
+    // SPECS is single-file only — route through the replace-confirmation
+    // flow instead of the normal multi-file loop below.
+    if (cat === 'specs') {
+      if (input.files.length > 1) {
+        this.toastr.error(
+          'Only one file can be attached under SPECS. Please select a single file.',
+          'Single File Only'
+        );
+      }
+      this.handleSpecsFile(input.files[0]);
+      input.value = '';
       return;
     }
 
-    // Check duplicate filenames
-    const isDuplicate = this.attachments[cat].some(
-      existing =>
-        existing.name.trim().toLowerCase() ===
-        file.name.trim().toLowerCase()
-    );
+    const duplicateNames: string[] = [];
+    const invalidFiles: string[] = [];
 
-    if (isDuplicate) {
-      duplicateNames.push(file.name);
-      return;
+    Array.from(input.files).forEach(file => {
+
+      // Validate file type
+      if (!this.isValidFile(file)) {
+        invalidFiles.push(file.name);
+        return;
+      }
+
+      // Check duplicate filenames
+      const isDuplicate = this.attachments[cat].some(
+        existing =>
+          existing.name.trim().toLowerCase() ===
+          file.name.trim().toLowerCase()
+      );
+
+      if (isDuplicate) {
+        duplicateNames.push(file.name);
+        return;
+      }
+
+      const entry: AttachFile = {
+        id: this.generateAttachId(),
+        name: file.name,
+        size: file.size,
+        progress: 0,
+        file
+      };
+
+      this.attachments[cat] = [...this.attachments[cat], entry];
+      this.simulateUpload(cat, entry.id);
+    });
+
+    // Show invalid file message
+    if (invalidFiles.length > 0) {
+      this.toastr.error(
+        `${invalidFiles.map(n => `"${n}"`).join(', ')} ${invalidFiles.length > 1 ? 'are' : 'is'
+        } not a supported file type. Only PDF, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed.`,
+        'Invalid File Type'
+      );
     }
 
-    const entry: AttachFile = {
-      id: this.generateAttachId(),
-      name: file.name,
-      size: file.size,
-      progress: 0,
-      file
-    };
+    // Show duplicate file message
+    if (duplicateNames.length > 0) {
+      this.toastr.error(
+        `${duplicateNames.map(n => `"${n}"`).join(', ')} ${duplicateNames.length > 1 ? 'are' : 'is'
+        } already attached in this section.`,
+        'Duplicate File'
+      );
+    }
 
-    this.attachments[cat] = [...this.attachments[cat], entry];
-    this.simulateUpload(cat, entry.id);
-  });
-
-  // Show invalid file message
-  if (invalidFiles.length > 0) {
-    this.toastr.error(
-      `${invalidFiles.map(n => `"${n}"`).join(', ')} ${
-        invalidFiles.length > 1 ? 'are' : 'is'
-      } not a supported file type. Only PDF, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed.`,
-      'Invalid File Type'
-    );
+    input.value = '';
   }
-
-  // Show duplicate file message
-  if (duplicateNames.length > 0) {
-    this.toastr.error(
-      `${duplicateNames.map(n => `"${n}"`).join(', ')} ${
-        duplicateNames.length > 1 ? 'are' : 'is'
-      } already attached in this section.`,
-      'Duplicate File'
-    );
-  }
-
-  input.value = '';
-}
 
   onAttachDragOver(event: DragEvent): void {
     event.preventDefault(); event.stopPropagation();
@@ -2859,7 +3844,21 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     event.preventDefault(); event.stopPropagation();
     if (this.blockIfCannotManage(cat)) return;
     const files = event.dataTransfer?.files;
-    if (!files) return;
+    if (!files || files.length === 0) return;
+
+    // SPECS is single-file only — same replace-confirmation flow as
+    // onAttachSelected() above, drag/drop is just another entry point.
+    if (cat === 'specs') {
+      if (files.length > 1) {
+        this.toastr.error(
+          'Only one file can be attached under SPECS. Please drop a single file.',
+          'Single File Only'
+        );
+      }
+      this.handleSpecsFile(files[0]);
+      return;
+    }
+
     // Same duplicate-filename guard as onAttachSelected() above — drag/drop
     // is just another entry point for adding a file to this same array.
     const duplicateNames: string[] = [];
@@ -2881,6 +3880,107 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
         'Duplicate File'
       );
     }
+  }
+
+  /** Validates a newly picked/dropped SPECS file and either attaches it
+   *  directly (no existing SPECS file yet) or stages it behind the
+   *  replace-confirmation modal (an existing SPECS file would otherwise
+   *  be silently swapped out from under the user). */
+  private handleSpecsFile(file: File): void {
+    if (!this.isValidFile(file)) {
+      this.toastr.error(
+        `"${file.name}" is not a supported file type. Only PDF, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed.`,
+        'Invalid File Type'
+      );
+      return;
+    }
+
+    const existing = this.attachments.specs[0];
+
+    if (!existing) {
+      this.addSingleAttachFile('specs', file);
+      return;
+    }
+
+    if (existing.name.trim().toLowerCase() === file.name.trim().toLowerCase()) {
+      this.toastr.error(`"${file.name}" is already attached in this section.`, 'Duplicate File');
+      return;
+    }
+
+    this.pendingSpecsFile = file;
+    this.pendingSpecsExisting = existing;
+    this.showSpecsReplaceModal = true;
+  }
+
+  /** User confirmed the popup — deactivate the existing SPECS file locally
+   *  and attach the newly selected file in its place. The old file's
+   *  backend record is deliberately NOT deleted here — see
+   *  pendingSpecsDeletion's comment above for why that has to wait until
+   *  submitConcept() actually persists the replacement. */
+  confirmSpecsReplace(): void {
+    const newFile = this.pendingSpecsFile;
+    const existing = this.pendingSpecsExisting;
+    this.showSpecsReplaceModal = false;
+    this.pendingSpecsFile = null;
+    this.pendingSpecsExisting = null;
+
+    if (!newFile || !existing) return;
+
+    // Only a persisted file needs a backend deletion at all. If a
+    // deletion is already staged from an earlier replace in this same
+    // editing session, keep tracking that original persisted file rather
+    // than overwriting it with an unsaved intermediate one that has
+    // nothing to delete on the server.
+    if (existing.attachmentId && !this.pendingSpecsDeletion) {
+      this.pendingSpecsDeletion = existing;
+    }
+
+    this.attachments.specs = this.attachments.specs.filter(x => x !== existing);
+    this.addSingleAttachFile('specs', newFile);
+  }
+
+  /** User dismissed the popup — the newly picked file is discarded and the
+   *  existing SPECS file stays untouched. */
+  cancelSpecsReplace(): void {
+    this.showSpecsReplaceModal = false;
+    this.pendingSpecsFile = null;
+    this.pendingSpecsExisting = null;
+  }
+
+  /** User confirmed switching into the new development cycle that was
+   *  created when this concept was superseded — navigate there. Routing
+   *  to a different concept id fires the routeSub in ngOnInit (paramMap
+   *  change) which runs loadConcept() and fully patches the page for the
+   *  new record, same as the create-a-new-concept navigation above. */
+  confirmSwitchToSupersededConcept(): void {
+    const targetId = this.pendingSupersededConceptId;
+    this.dismissSupersededSwitchModal();
+    if (targetId) {
+      this.router.navigate(['/concept-create', targetId]);
+    }
+  }
+
+  /** User chose to stay put — the current concept was already refreshed
+   *  as read-only by submitConcept()'s soft-reload, so there's nothing
+   *  else to undo here, just close the popup. They can switch later from
+   *  the concept's own history/activity trail. */
+  dismissSupersededSwitchModal(): void {
+    this.showSupersededSwitchModal = false;
+    this.pendingSupersededConceptId = null;
+  }
+
+  /** Shared tail end of "add one validated file to a category" — used both
+   *  for the first SPECS file and for the replacement after confirmation. */
+  private addSingleAttachFile(cat: AttachCategory, file: File): void {
+    const entry: AttachFile = {
+      id: this.generateAttachId(),
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      file
+    };
+    this.attachments[cat] = [...this.attachments[cat], entry];
+    this.simulateUpload(cat, entry.id);
   }
 
   /** A file just picked this session (never submitted) has no backend
@@ -2906,6 +4006,16 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     if (cat === 'specs') {
       const remaining = this.attachments.specs.filter(x => x !== f).length;
       if (remaining === 0) {
+        // If a replace is currently staged (see confirmSpecsReplace()),
+        // the sole remaining SPECS file is that unsaved replacement, and
+        // the original persisted file was never actually deleted from the
+        // backend. Removing it just means "never mind" — restore the
+        // original instead of leaving SPECS empty or blocking the removal.
+        if (this.pendingSpecsDeletion) {
+          this.attachments.specs = [this.pendingSpecsDeletion];
+          this.pendingSpecsDeletion = null;
+          return;
+        }
         this.toastr.error(
           'At least one SPECS file is required. Upload a replacement before removing this one.',
           'Cannot Remove'
@@ -2922,14 +4032,16 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     const user_id = Number(sessionStorage.getItem('userId'));
     try {
       const formData = new FormData();
-      formData.append('concept_id',    this.conceptId);
+      formData.append('concept_id', this.conceptId);
       formData.append('attachment_id', f.attachmentId.toString());
-      formData.append('category',      cat);
-      formData.append('user_id',       user_id.toString());
+      formData.append('category', cat);
+      formData.append('user_id', user_id.toString());
 
       await this.service.deleteattachment(formData).toPromise();
       this.attachments[cat] = this.attachments[cat].filter(x => x !== f);
       this.toastr.success('File deleted successfully!', 'Success');
+      this.loadLatestUpdates(true);
+      this.refreshConceptData(this.conceptId);
     } catch (err: any) {
       const msg = err?.error?.detail || err?.error?.message || err?.message || 'Failed to delete file';
       this.toastr.error(msg, 'Error');
@@ -2979,7 +4091,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
   }
 
   formatFileSize(bytes: number): string {
-    if (bytes < 1024)    return `${bytes} B`;
+    if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1048576).toFixed(1)} MB`;
   }
@@ -2997,23 +4109,23 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     // estimatedDollars errors here, and vice versa.
     this.approvalSubmitAttempted = true;
     if (!this.canSubmitApproval) {
-    this.toastr.error('You do not have permission to submit client approvals.', 'Access Denied');
-    return;
-  }
-  if (this.isDraftConcept) {
-    this.toastr.error(
-      'This concept is still a draft. Please submit the Concept Development tab first before adding a Client Approval.',
-      'Concept Not Submitted'
-    );
-    return;
-  }
-  if (!this.conceptId) {
-  this.toastr.error(
-    'Please save the Concept Information first before submitting Client Approval.',
-    'Concept Not Saved'
-  );
-  return;
-}
+      this.toastr.error('You do not have permission to submit client approvals.', 'Access Denied');
+      return;
+    }
+    if (this.isDraftConcept) {
+      this.toastr.error(
+        'This concept is still a draft. Please submit the Concept Development tab first before adding a Client Approval.',
+        'Concept Not Submitted'
+      );
+      return;
+    }
+    if (!this.conceptId) {
+      this.toastr.error(
+        'Please save the Concept Information first before submitting Client Approval.',
+        'Concept Not Saved'
+      );
+      return;
+    }
     // Safety net behind the [disabled] binding on the button itself —
     // blocks the call even if it's triggered some other way (e.g. Enter
     // key) while a file's progress bar hasn't reached 100% yet.
@@ -3024,13 +4136,13 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
 
     // Every field on this tab is mandatory before submitting.
     const requiredFields: { control: string; label: string }[] = [
-      { control: 'clientConceptName',        label: 'Concept Name' },
+      { control: 'clientConceptName', label: 'Concept Name' },
       { control: 'clientConceptDescription', label: 'Client Concept Description' },
-      { control: 'clientApprovalStatus',     label: 'Client Approval Status' },
-      { control: 'submittedToClientOn',      label: 'Submitted To Client On' },
-      { control: 'clientEstimatedVolume',    label: 'Estimated Volume' },
-      { control: 'clientEstimatedDollars',   label: 'Estimated Dollars' },
-      { control: 'clientApprovalNotes',      label: 'Client Review & Approval Notes' }
+      { control: 'clientApprovalStatus', label: 'Client Approval Status' },
+      { control: 'submittedToClientOn', label: 'Submitted To Client On' },
+      { control: 'clientEstimatedVolume', label: 'Estimated Volume' },
+      { control: 'clientEstimatedDollars', label: 'Estimated Dollars' },
+      { control: 'clientApprovalNotes', label: 'Client Review & Approval Notes' }
     ];
 
     const missing = requiredFields.filter(f => {
@@ -3080,26 +4192,26 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     }
 
     const approvalData = {
-      conceptId:                this.conceptId,
+      conceptId: this.conceptId,
       conceptname: this.form.get('conceptName')?.value,
-      clientConceptName:        this.form.get('clientConceptName')?.value,
+      clientConceptName: this.form.get('clientConceptName')?.value,
       clientConceptDescription: this.form.get('clientConceptDescription')?.value,
-      clientApprovalStatus:     this.form.get('clientApprovalStatus')?.value,
-      submittedToClientOn:      this.form.get('submittedToClientOn')?.value,
-      clientApprovalNotes:      this.form.get('clientApprovalNotes')?.value,
-      estimatedVolume:          this.form.get('clientEstimatedVolume')?.value,
-      estimatedDollars:         this.form.get('clientEstimatedDollars')?.value,
-      clientApprovalCompleted:  1
+      clientApprovalStatus: this.form.get('clientApprovalStatus')?.value,
+      submittedToClientOn: this.form.get('submittedToClientOn')?.value,
+      clientApprovalNotes: this.form.get('clientApprovalNotes')?.value,
+      estimatedVolume: this.form.get('clientEstimatedVolume')?.value,
+      estimatedDollars: this.form.get('clientEstimatedDollars')?.value,
+      clientApprovalCompleted: 1
     };
     console.log('Client Approval Data:', approvalData);
 
-    
-    await this.submitClientApproval(this.conceptId,approvalData);
+
+    await this.submitClientApproval(this.conceptId, approvalData);
   }
 
-  async submitClientApproval(conceptId:string,data: any): Promise<void> {
-  this.loading = true;
-  const isUpdate = this.clientApprovalCompleted === 1;
+  async submitClientApproval(conceptId: string, data: any): Promise<void> {
+    this.loading = true;
+    const isUpdate = this.clientApprovalCompleted === 1;
 
 
     try {
@@ -3117,7 +4229,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
         f => f.file && f.file.size > 0
       );
       filesToUpload.forEach(entry => {
-        formData.append('files',      entry.file, entry.file.name);
+        formData.append('files', entry.file, entry.file.name);
         formData.append('categories', 'approval');
         formData.append('file_names', entry.file.name);
         formData.append('file_sizes', entry.file.size.toString());
@@ -3127,7 +4239,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
       console.log('[submitClientApproval] filesToUpload count:', filesToUpload.length,
         filesToUpload.map(f => f.name));
 
-      const response = await this.service.submitclientApproval(formData,conceptId).toPromise();
+      const response = await this.service.submitclientApproval(formData, conceptId).toPromise();
       filesToUpload.forEach(entry => { entry.progress = 100; });
       this.clientApprovalCompleted = 1;
       // These fields are now exactly what's persisted — clear their dirty
@@ -3135,12 +4247,12 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
       // correctly recognized as "no changes" (see getApprovalFieldsChanged()).
       this.approvalFields.forEach(f => this.form.get(f)?.markAsPristine());
 
-        this.toastr.success(
-          isUpdate
-            ? 'Approval updated successfully!'
-            : 'Approval submitted successfully!',
-          'Success'
-        );
+      this.toastr.success(
+        isUpdate
+          ? 'Approval updated successfully!'
+          : 'Approval submitted successfully!',
+        'Success'
+      );
 
       // Refresh the left panel + soft-reload this concept's data so the
       // page reflects exactly what was just persisted — no full page
@@ -3207,14 +4319,16 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     const user_id = Number(sessionStorage.getItem('userId'));
     try {
       const formData = new FormData();
-      formData.append('concept_id',    this.conceptId);
+      formData.append('concept_id', this.conceptId);
       formData.append('attachment_id', doc.attachmentId.toString());
-      formData.append('category',      'supporting_docs');
-      formData.append('user_id',       user_id.toString());
+      formData.append('category', 'supporting_docs');
+      formData.append('user_id', user_id.toString());
 
       await this.service.deleteattachment(formData).toPromise();
       this.removeSupportingDocLocally(index);
       this.toastr.success('Document deleted successfully!', 'Success');
+      this.loadLatestUpdates(true);
+      this.refreshConceptData(this.conceptId);
     } catch (err: any) {
       const msg = err?.error?.detail || err?.error?.message || err?.message || 'Failed to delete document';
       this.toastr.error(msg, 'Error');
@@ -3236,48 +4350,48 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
   }
 
   onGlobalDocFileSelected(event: Event): void {
-  if (this.blockIfCannotManageDocs()) return;
-  if (this.pendingDocIndex === null) return;
+    if (this.blockIfCannotManageDocs()) return;
+    if (this.pendingDocIndex === null) return;
 
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
 
-  if (!file) return;
-  // Validate file type
-  if (!this.isValidFile(file)) {
-    this.toastr.error(
-      'Only PDF, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed.',
-      'Invalid File Type'
+    if (!file) return;
+    // Validate file type
+    if (!this.isValidFile(file)) {
+      this.toastr.error(
+        'Only PDF, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed.',
+        'Invalid File Type'
+      );
+      input.value = '';
+      this.pendingDocIndex = null;
+      return;
+    }
+
+    const idx = this.pendingDocIndex;
+
+    // Check for duplicate filenames in other Supporting Document slots
+    const isDuplicate = this.supportingDocs.some(
+      (doc, i) =>
+        i !== idx &&
+        doc.file &&
+        doc.file.name.trim().toLowerCase() === file.name.trim().toLowerCase()
     );
-    input.value = '';
-    this.pendingDocIndex = null;
-    return;
-  }
 
-  const idx = this.pendingDocIndex;
+    if (isDuplicate) {
+      this.toastr.error(
+        `"${file.name}" is already attached in another Supporting Document slot.`,
+        'Duplicate File'
+      );
+      input.value = '';
+      this.pendingDocIndex = null;
+      return;
+    }
 
-  // Check for duplicate filenames in other Supporting Document slots
-  const isDuplicate = this.supportingDocs.some(
-    (doc, i) =>
-      i !== idx &&
-      doc.file &&
-      doc.file.name.trim().toLowerCase() === file.name.trim().toLowerCase()
-  );
-
-  if (isDuplicate) {
-    this.toastr.error(
-      `"${file.name}" is already attached in another Supporting Document slot.`,
-      'Duplicate File'
-    );
-    input.value = '';
-    this.pendingDocIndex = null;
-    return;
-  }
-
-  // Keep sourceurl unchanged and update the selected document
-  this.supportingDocs = this.supportingDocs.map((doc, i) =>
-    i === idx
-      ? {
+    // Keep sourceurl unchanged and update the selected document
+    this.supportingDocs = this.supportingDocs.map((doc, i) =>
+      i === idx
+        ? {
           ...doc,
           name: file.name,
           file,
@@ -3285,20 +4399,20 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
           originalFileName: undefined,
           originalFileSize: undefined
         }
-      : doc
-  );
+        : doc
+    );
 
-  this.cdr.detectChanges();
-  this.simulateDocUpload(idx);
+    this.cdr.detectChanges();
+    this.simulateDocUpload(idx);
 
-  input.value = '';
-  this.pendingDocIndex = null;
-}
+    input.value = '';
+    this.pendingDocIndex = null;
+  }
 
   onDocFileSelected(event: Event, index: number): void {
     if (this.blockIfCannotManageDocs()) return;
     const input = event.target as HTMLInputElement;
-    const file  = input.files?.[0];
+    const file = input.files?.[0];
     if (!file) return;
 
     const isDuplicate = this.supportingDocs.some(
@@ -3314,7 +4428,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     }
 
     // sourceurl left as-is — see the matching note in onGlobalDocFileSelected.
-    const updated  = [...this.supportingDocs];
+    const updated = [...this.supportingDocs];
     updated[index] = { ...updated[index], name: file.name.replace(/\.[^.]+$/, ''), file, uploadProgress: 0, originalFileName: undefined, originalFileSize: undefined };
     this.supportingDocs = updated;
     this.simulateDocUpload(index);
@@ -3339,7 +4453,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     }
 
     // sourceurl left as-is — see the matching note in onGlobalDocFileSelected.
-    const updated  = [...this.supportingDocs];
+    const updated = [...this.supportingDocs];
     updated[index] = { ...updated[index], name: file.name.replace(/\.[^.]+$/, ''), file, uploadProgress: 0, originalFileName: undefined, originalFileSize: undefined };
     this.supportingDocs = updated;
     this.simulateDocUpload(index);
@@ -3380,9 +4494,9 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
   }
 
   // ── Doc Viewer ────────────────────────────────────────────────────────
-  isWordExt(ext: string): boolean  { return ['docx', 'doc'].includes(ext.toLowerCase()); }
+  isWordExt(ext: string): boolean { return ['docx', 'doc'].includes(ext.toLowerCase()); }
   isExcelExt(ext: string): boolean { return ['xlsx', 'xls'].includes(ext.toLowerCase()); }
-  isPdfExt(ext: string): boolean   { return ext.toLowerCase() === 'pdf'; }
+  isPdfExt(ext: string): boolean { return ext.toLowerCase() === 'pdf'; }
 
   /** Fetches a stored file's bytes from /api/download-attachment/{id} and
    *  opens it in the in-app preview (Word/Excel/PDF viewer). Shared by
@@ -3414,12 +4528,12 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
   private inferMimeType(name: string): string {
     const ext = name.split('.').pop()?.toLowerCase() ?? '';
     switch (ext) {
-      case 'pdf':  return 'application/pdf';
-      case 'doc':  return 'application/msword';
+      case 'pdf': return 'application/pdf';
+      case 'doc': return 'application/msword';
       case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-      case 'xls':  return 'application/vnd.ms-excel';
+      case 'xls': return 'application/vnd.ms-excel';
       case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-      default:     return 'application/octet-stream';
+      default: return 'application/octet-stream';
     }
   }
 
@@ -3468,13 +4582,13 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
 
       if (this.isWordExt(ext) || this.isExcelExt(ext) || this.isPdfExt(ext)) {
         this.docViewerFileName = file.name;
-        this.docViewerFileExt  = ext.toUpperCase();
-        this.docWordHtml       = '';
-        this.docSheets         = [];
-        this.docActiveSheet    = 0;
+        this.docViewerFileExt = ext.toUpperCase();
+        this.docWordHtml = '';
+        this.docSheets = [];
+        this.docActiveSheet = 0;
         this.revokePdfUrl();
-        this.docViewerVisible  = true;
-        this.docViewerLoading  = true;
+        this.docViewerVisible = true;
+        this.docViewerLoading = true;
         // Force a render now so the backdrop + "Loading preview…" state is
         // visible immediately, before we hand off to native browser APIs
         // below (createObjectURL / Blob.arrayBuffer) whose promise
@@ -3502,8 +4616,8 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
         return;
       }
     }
-    if (doc.pdfLocation)     window.open(doc.pdfLocation, '_blank');
-    else if (doc.sourceurl)        window.open(doc.sourceurl, '_blank');
+    if (doc.pdfLocation) window.open(doc.pdfLocation, '_blank');
+    else if (doc.sourceurl) window.open(doc.sourceurl, '_blank');
     else if (file && file.size > 0) {
       // Generic fallback for file types we don't render inline (images, etc.)
       const objectUrl = URL.createObjectURL(file);
@@ -3526,14 +4640,14 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
   }
 
   private async renderDocWord(buffer: ArrayBuffer): Promise<void> {
-    const result     = await mammoth.convertToHtml({ arrayBuffer: buffer });
+    const result = await mammoth.convertToHtml({ arrayBuffer: buffer });
     this.docWordHtml = this.sanitizer.bypassSecurityTrustHtml(result.value);
   }
 
   private renderDocExcel(buffer: ArrayBuffer): void {
-    const workbook   = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-    this.docSheets   = workbook.SheetNames.map(name => {
-      const ws       = workbook.Sheets[name];
+    const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+    this.docSheets = workbook.SheetNames.map(name => {
+      const ws = workbook.Sheets[name];
       const data: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1 });
       return { sheetName: name, headers: (data[0] as string[]) || [], rows: data.slice(1) };
     });
@@ -3592,8 +4706,8 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
    *  categories — drives [disabled] on the card's "Download All" button. */
   get hasAnyAttachments(): boolean {
     return this.attachments.specs.length > 0 ||
-           this.attachments.table.length  > 0 ||
-           this.attachments.other.length  > 0;
+      this.attachments.table.length > 0 ||
+      this.attachments.other.length > 0;
   }
 
   /** Same as hasAnyAttachments, scoped to the Client Approval tab's own
@@ -3601,6 +4715,14 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
    *  "Download All" button without mixing in Development-tab files. */
   get hasAnyApprovalAttachments(): boolean {
     return this.attachments.approval.length > 0;
+  }
+
+  /** SPECS is the only required attachment category on the Concept
+   *  Development tab — drives [disabled] on "Create Concept" / "Update"
+   *  so the button stays disabled until at least one SPECS file is
+   *  attached. */
+  get hasSpecsAttachment(): boolean {
+    return this.attachments.specs.length > 0;
   }
 
   /** Downloads every Attachments-tab file across all three categories.
@@ -3742,7 +4864,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
 
   // ── Upload Modal ──────────────────────────────────────────────────────
   openUploadModal(): void {
-    this.showUploadModal    = true;
+    this.showUploadModal = true;
     this.modalSelectedIndex = this.supportingDocs.length > 0 ? this.supportingDocs.length - 1 : null;
   }
 
@@ -3750,10 +4872,10 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
 
   onModalFileSelected(event: Event): void {
     const input = event.target as HTMLInputElement;
-    const file  = input.files?.[0];
+    const file = input.files?.[0];
     if (!file) return;
     const newDoc: SupportingDoc = { ...this.blankDoc(), name: file.name.replace(/\.[^.]+$/, ''), file };
-    this.supportingDocs     = [...this.supportingDocs, newDoc];
+    this.supportingDocs = [...this.supportingDocs, newDoc];
     this.modalSelectedIndex = this.supportingDocs.length - 1;
     this.simulateDocUpload(this.modalSelectedIndex);
     input.value = '';
@@ -3764,7 +4886,7 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
     const newDoc: SupportingDoc = { ...this.blankDoc(), name: file.name.replace(/\.[^.]+$/, ''), file };
-    this.supportingDocs     = [...this.supportingDocs, newDoc];
+    this.supportingDocs = [...this.supportingDocs, newDoc];
     this.modalSelectedIndex = this.supportingDocs.length - 1;
     this.simulateDocUpload(this.modalSelectedIndex);
   }
@@ -3794,20 +4916,20 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
     const isUpdate = this.supportingDocumentsCompleted === 1;
 
     if (!this.canManageSupportingDocs) {
-    this.toastr.error('You do not have permission to submit supporting documents.', 'Access Denied');
-    return;
-  }
-  if (this.isDraftConcept) {
-    this.toastr.error(
-      'This concept is still a draft. Please submit the Concept Development tab first before adding Supporting Documents.',
-      'Concept Not Submitted'
-    );
-    return;
-  }
-  if (this.isSupportingDocUploading) {
-    this.toastr.error('Please wait for all files to finish uploading.', 'Upload in progress');
-    return;
-  }
+      this.toastr.error('You do not have permission to submit supporting documents.', 'Access Denied');
+      return;
+    }
+    if (this.isDraftConcept) {
+      this.toastr.error(
+        'This concept is still a draft. Please submit the Concept Development tab first before adding Supporting Documents.',
+        'Concept Not Submitted'
+      );
+      return;
+    }
+    if (this.isSupportingDocUploading) {
+      this.toastr.error('Please wait for all files to finish uploading.', 'Upload in progress');
+      return;
+    }
     const user_id = Number(sessionStorage.getItem('userId'));
     if (!this.conceptId) {
       this.toastr.error(
@@ -3885,14 +5007,14 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
       // under an earlier (deleted) doc's index and silently deactivate
       // the wrong attachment on the backend.
       const sdMetadata = {
-        concept_id:                   this.conceptId,
+        concept_id: this.conceptId,
         SupportingDocumentsCompleted: 1,
         supportingDocs: validDocs.map(d => {
           const { fileName, fileSize } = this.resolveDocFileMeta(d);
           return {
-            docIndex:    d.docIndex,
-            name:        d.name,
-            sourceurl:   d.sourceurl,
+            docIndex: d.docIndex,
+            name: d.name,
+            sourceurl: d.sourceurl,
             pdfLocation: d.pdfLocation,
             fileName,
             fileSize
@@ -3908,18 +5030,18 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
       // validDocs/this loop.
       const formData = new FormData();
       formData.append('concept_id', this.conceptId);
-      formData.append('metadata',   JSON.stringify(sdMetadata));
-      formData.append('category',  'supporting_docs');
-      formData.append('user_id',    user_id.toString());
+      formData.append('metadata', JSON.stringify(sdMetadata));
+      formData.append('category', 'supporting_docs');
+      formData.append('user_id', user_id.toString());
 
       validDocs.forEach((doc) => {
         if (!doc.file || doc.file.size === 0) return; // URL-only doc — nothing to upload
-        formData.append('files',       doc.file, doc.file.name);
+        formData.append('files', doc.file, doc.file.name);
         formData.append('doc_indices', doc.docIndex.toString());
-        formData.append('doc_names',   doc.name || doc.file.name);
+        formData.append('doc_names', doc.name || doc.file.name);
         formData.append('source_urls', doc.sourceurl || '');
-        formData.append('file_names',  doc.file.name);
-        formData.append('file_sizes',  doc.file.size.toString());
+        formData.append('file_names', doc.file.name);
+        formData.append('file_sizes', doc.file.size.toString());
       });
 
       const res: any = await this.service.submitsupportingdocuments(formData).toPromise();
@@ -3955,9 +5077,9 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
 
     } catch (err: any) {
       const msg =
-        err?.error?.detail  ||
+        err?.error?.detail ||
         err?.error?.message ||
-        err?.message        ||
+        err?.message ||
         'Upload failed. Please try again.';
       this.toastr.error(this.friendlyErrorMessage(msg), 'Error');
     } finally {
@@ -3984,313 +5106,449 @@ onAttachSelected(event: Event, cat: AttachCategory): void {
    *  what read as the Concept List "blinking" whenever the user clicked
    *  Save as Draft (or Submit, or either of the other tabs' Submits).
    *  Only the true first-ever load (ngOnInit) needs the spinner. */
-private loadLatestUpdates(background: boolean = false): void {
-  if (!background) {
-    this.latestUpdatesLoading = true;
+  private loadLatestUpdates(background: boolean = false): void {
+    if (!background) {
+      this.latestUpdatesLoading = true;
+    }
+
+    this.service.getLatestUpdates().subscribe({
+      next: (res) => {
+        const concepts: any[] = res?.data ?? [];
+
+        this.latestConcepts = concepts
+          .slice()
+          .sort((a, b) => {
+            const bTime = new Date(b.UpdatedDate ?? b.CreatedDate).getTime();
+            const aTime = new Date(a.UpdatedDate ?? a.CreatedDate).getTime();
+            return bTime - aTime;
+          })
+          .map(c => ({
+            ...c,
+            statusClass: this.getStatusClass(c.DevelopmentStatus),
+            isDraft: !!(c.IsDraft ?? c.isDraft)
+          }));
+
+        if (!background) {
+          this.latestUpdatesLoading = false;
+        }
+
+        // Bring the concept the user is currently working on into view —
+        // its position in this list can shift (e.g. after an edit bumps it
+        // via UpdatedDate), so without this it can silently scroll out of
+        // the visible panel even though .active styling is still correctly
+        // applied to its card.
+        this.scrollActiveConceptIntoView();
+      },
+      error: (err) => {
+        console.error('Failed to load latest updates:', err);
+        if (!background) {
+          this.latestUpdatesLoading = false;
+        }
+      }
+    });
   }
 
-  this.service.getLatestUpdates().subscribe({
-    next: (res) => {
-      const concepts: any[] = res?.data ?? [];
-      console.log("******this is concepts:",concepts)
-
-      this.latestConcepts = concepts
-        .slice()
-        .sort((a, b) => {
-          const bTime = new Date(b.UpdatedDate ?? b.CreatedDate).getTime();
-          const aTime = new Date(a.UpdatedDate ?? a.CreatedDate).getTime();
-          return bTime - aTime;
-        })
-        .map(c => ({
-          ...c,
-          statusClass: this.getStatusClass(c.DevelopmentStatus),
-          isDraft: !!(c.IsDraft ?? c.isDraft)
-        }));
-
-      if (!background) {
-        this.latestUpdatesLoading = false;
+  /** Scrolls the currently-open concept's card into view (aligned to the
+   *  top of the panel) in the Latest Updates panel, if it isn't already
+   *  visible. Runs after every list (re)load — initial load, background
+   *  refresh after a save, and concept switches — since the active card's
+   *  position can change (new sort order, list re-fetch) independently of
+   *  the user scrolling anywhere.
+   *
+   *  On a brand-new navigation into this page (e.g. clicking a row on the
+   *  Dashboard), this can be called BEFORE the Latest Updates list has
+   *  finished loading — loadConcept()'s single-concept fetch and
+   *  loadLatestUpdates()'s full-list fetch race, and whichever call lands
+   *  first won't find the card in the DOM yet. Rather than rely solely on
+   *  the other call's own scrollActiveConceptIntoView() to pick up the
+   *  slack, this retries for a couple of seconds until the card actually
+   *  exists, so the highlight+scroll always lands correctly regardless of
+   *  which fetch resolves first. */
+  private scrollActiveConceptIntoView(): void {
+    if (!this.conceptId) return;
+    const targetId = this.conceptId;
+    let attempts = 0;
+    const tryScroll = () => {
+      // Bail if the user has since navigated to a different concept.
+      if (this.conceptId !== targetId) return;
+      const el = document.querySelector(
+        `[data-concept-id="${targetId}"], [data-current-concept-id="${targetId}"]`
+      );
+      if (el) {
+        el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        return;
       }
-
-      // Bring the concept the user is currently working on into view —
-      // its position in this list can shift (e.g. after an edit bumps it
-      // via UpdatedDate), so without this it can silently scroll out of
-      // the visible panel even though .active styling is still correctly
-      // applied to its card.
-      this.scrollActiveConceptIntoView();
-    },
-    error: (err) => {
-      console.error('Failed to load latest updates:', err);
-      if (!background) {
-        this.latestUpdatesLoading = false;
+      attempts++;
+      if (attempts < 20) {
+        setTimeout(tryScroll, 100);
       }
+    };
+    // Wait a tick for the *ngFor to actually render before the first check.
+    setTimeout(tryScroll);
+  }
+
+  /** Resets the scrollable form area (.tab-content) back to the top whenever
+   *  a concept is (re)loaded. Without this, navigating to a concept — e.g.
+   *  clicking a row on the Dashboard, or picking a different concept from
+   *  the Latest Updates panel — leaves the form wherever the PREVIOUS
+   *  concept happened to be scrolled to, since Angular reuses this same
+   *  component instance across /concept-create/:id navigations (see
+   *  routeSub in ngOnInit) and never remounts .tab-content. */
+  private scrollTabContentToTop(): void {
+    setTimeout(() => {
+      const el = this.tabContentRef?.nativeElement;
+      if (el) el.scrollTop = 0;
+    });
+  }
+
+  /** trackBy for the Concept List *ngFor — keyed on the stable anchor id,
+   *  so a background refresh (see loadLatestUpdates()'s background param)
+   *  only patches the rows that actually changed instead of Angular
+   *  tearing down and rebuilding every card in the list each time. */
+  trackByConceptId(index: number, item: LatestConceptItem): string {
+    return item.ConceptId;
+  }
+
+
+  getStatusClass(status: string): string {
+    switch (status) {
+      case 'New':
+        return 'lu-new';
+
+      case 'Programming Queue':
+      case 'Programming':
+      case 'Researching':
+        return 'lu-progress';
+
+      case 'Result Set QA':
+      case 'QA Revise':
+        return 'lu-qa';
+
+      case 'Approved':
+        return 'lu-approved';
+
+      case 'Client Review':
+      case 'Client Revise':
+      case 'Client Resubmit':
+        return 'lu-client-review';
+
+      case 'Client Approved':
+        return 'lu-client-approved';
+
+      case 'Client Denied':
+        return 'lu-client-denied';
+
+      case 'Pre-Production':
+        return 'lu-preproduction';
+
+      case 'Production':
+        return 'lu-production';
+
+      case 'Closed':
+        return 'lu-closed';
+
+      case 'Hold':
+      case 'Revisit':
+        return 'lu-hold';
+
+      case 'Superseded':
+        return 'lu-superseded';
+
+      default:
+        return '';
     }
-  });
-}
+  }
+  // onSelectLatestConcept(item: LatestConceptItem): void {
+  //   if (item.conceptId === this.conceptId) return;
+  //   this.isEditMode = true;
+  //   this.conceptId  = item.conceptId;
+  //   this.loadConcept(item.conceptId);
+  // }
+  onSelectLatestConcept(item: LatestConceptItem): void {
+    // MUST route on the stable anchor (ConceptId), never the version/display
+    // id (CurrentConceptId). Routing on CurrentConceptId sends a display id
+    // back to the server as concept_id on the next Update; the backend won't
+    // recognize it as an existing anchor and will insert a brand-new
+    // ConceptKeys/Concepts row instead of updating the original one.
+    if (this.isActiveConcept(item)) return;
+    this.router.navigate(['/concept-create', item.ConceptId]);
+  }
 
-/** Scrolls the currently-open concept's card into view (aligned to the
- *  top of the panel) in the Latest Updates panel, if it isn't already
- *  visible. Runs after every list (re)load — initial load, background
- *  refresh after a save, and concept switches — since the active card's
- *  position can change (new sort order, list re-fetch) independently of
- *  the user scrolling anywhere.
- *
- *  On a brand-new navigation into this page (e.g. clicking a row on the
- *  Dashboard), this can be called BEFORE the Latest Updates list has
- *  finished loading — loadConcept()'s single-concept fetch and
- *  loadLatestUpdates()'s full-list fetch race, and whichever call lands
- *  first won't find the card in the DOM yet. Rather than rely solely on
- *  the other call's own scrollActiveConceptIntoView() to pick up the
- *  slack, this retries for a couple of seconds until the card actually
- *  exists, so the highlight+scroll always lands correctly regardless of
- *  which fetch resolves first. */
-private scrollActiveConceptIntoView(): void {
-  if (!this.conceptId) return;
-  const targetId = this.conceptId;
-  let attempts = 0;
-  const tryScroll = () => {
-    // Bail if the user has since navigated to a different concept.
-    if (this.conceptId !== targetId) return;
-    const el = document.querySelector(
-      `[data-concept-id="${targetId}"], [data-current-concept-id="${targetId}"]`
-    );
-    if (el) {
-      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  /** Whether a Latest-Updates card is the concept currently open on the
+   *  page. Compares as STRINGS on purpose: this.conceptId always comes
+   *  from the route param (Angular route params are always strings), but
+   *  item.ConceptId's *actual* runtime type depends on whatever
+   *  /api/latest-updates serializes it as — the `ConceptId: string`
+   *  interface field above is only a compile-time annotation, not a
+   *  guarantee. If the backend returns it as a JSON number for some rows
+   *  (mixed int/varchar concept-id columns, legacy vs new data, etc.), a
+   *  strict `===` against the route's string id fails ONLY for those rows
+   *  — which is exactly why the active highlight used to work for some
+   *  concepts and not others depending on which one you opened.
+   *
+   *  ALSO checks CurrentConceptId (the display/version id) as a fallback.
+   *  This must always route on ConceptId (the stable anchor) — see the
+   *  routing note on onSelectLatestConcept() — but if some OTHER entry
+   *  point (e.g. the Dashboard's grid) ever navigates here using a
+   *  display id instead of the anchor, this keeps the sidebar highlight
+   *  working anyway rather than silently failing to match at all. This
+   *  is a UI safety net only; it does not fix (and should not be relied
+   *  on to mask) an upstream caller sending the wrong id — see that
+   *  comment for why sending CurrentConceptId as concept_id on a
+   *  subsequent Update is a real data-integrity risk, not just a display
+   *  quirk. */
+  isActiveConcept(item: LatestConceptItem): boolean {
+    const current = String(this.conceptId);
+    return String(item.ConceptId) === current || String(item.CurrentConceptId) === current;
+  }
+
+  loadUserFiles(): void {
+    const user_id = Number(sessionStorage.getItem('userId'));
+    if (!user_id) {
       return;
     }
-    attempts++;
-    if (attempts < 20) {
-      setTimeout(tryScroll, 100);
+
+    this.service.getuserfiles(user_id).subscribe({
+      next: (res) => {
+        console.log('User Files:', res);
+
+        // Populate supporting documents here
+        // this.supportingDocs = res.data;
+      },
+      error: (err) => {
+        console.error('Failed to load user files', err);
+        this.toastr.error('Failed to load supporting documents', 'Error');
+      }
+    });
+  }
+
+  // ── Activity History ─────────────────────────────────────────────────
+  /** Rows actually rendered in the collapsed card — full list once
+   *  "View full history" has been clicked, otherwise just the most
+   *  recent activityHistoryPreviewCount entries. activityHistory itself
+   *  is already newest-first (see concept_history.py), so no extra
+   *  sort/slice-from-the-end logic is needed here. */
+  get visibleActivityHistory(): ActivityHistoryItem[] {
+    return this.showFullActivityHistory
+      ? this.activityHistory
+      : this.activityHistory.slice(0, this.activityHistoryPreviewCount);
+  }
+
+  toggleFullActivityHistory(): void {
+    this.showFullActivityHistory = !this.showFullActivityHistory;
+  }
+
+  /** Fetches the audit trail for the given concept. Safe to call with an
+   *  empty/undefined id (e.g. a brand-new, not-yet-saved concept) — just
+   *  clears the list rather than firing a request that can't succeed. */
+  loadActivityHistory(id: string): void {
+    if (!id) {
+      this.activityHistory = [];
+      return;
     }
-  };
-  // Wait a tick for the *ngFor to actually render before the first check.
-  setTimeout(tryScroll);
-}
-
-/** Resets the scrollable form area (.tab-content) back to the top whenever
- *  a concept is (re)loaded. Without this, navigating to a concept — e.g.
- *  clicking a row on the Dashboard, or picking a different concept from
- *  the Latest Updates panel — leaves the form wherever the PREVIOUS
- *  concept happened to be scrolled to, since Angular reuses this same
- *  component instance across /concept-create/:id navigations (see
- *  routeSub in ngOnInit) and never remounts .tab-content. */
-private scrollTabContentToTop(): void {
-  setTimeout(() => {
-    const el = this.tabContentRef?.nativeElement;
-    if (el) el.scrollTop = 0;
-  });
-}
-
-/** trackBy for the Concept List *ngFor — keyed on the stable anchor id,
- *  so a background refresh (see loadLatestUpdates()'s background param)
- *  only patches the rows that actually changed instead of Angular
- *  tearing down and rebuilding every card in the list each time. */
-trackByConceptId(index: number, item: LatestConceptItem): string {
-  return item.ConceptId;
-}
-
-
-getStatusClass(status: string): string {
-  switch (status) {
-    case 'New':
-      return 'lu-new';
-
-    case 'Programming Queue':
-    case 'Programming':
-    case 'Researching':
-      return 'lu-progress';
-
-    case 'Result Set QA':
-    case 'QA Revise':
-      return 'lu-qa';
-
-    case 'Approved':
-      return 'lu-approved';
-
-    case 'Client Review':
-    case 'Client Revise':
-    case 'Client Resubmit':
-      return 'lu-client-review';
-
-    case 'Client Approved':
-      return 'lu-client-approved';
-
-    case 'Client Denied':
-      return 'lu-client-denied';
-
-    case 'Pre-Production':
-      return 'lu-preproduction';
-
-    case 'Production':
-      return 'lu-production';
-
-    case 'Closed':
-      return 'lu-closed';
-
-    case 'Hold':
-    case 'Revisit':
-      return 'lu-hold';
-
-    case 'Superseded':
-      return 'lu-superseded';
-
-    default:
-      return '';
-  }
-}
-// onSelectLatestConcept(item: LatestConceptItem): void {
-//   if (item.conceptId === this.conceptId) return;
-//   this.isEditMode = true;
-//   this.conceptId  = item.conceptId;
-//   this.loadConcept(item.conceptId);
-// }
-onSelectLatestConcept(item: LatestConceptItem): void {
-  // MUST route on the stable anchor (ConceptId), never the version/display
-  // id (CurrentConceptId). Routing on CurrentConceptId sends a display id
-  // back to the server as concept_id on the next Update; the backend won't
-  // recognize it as an existing anchor and will insert a brand-new
-  // ConceptKeys/Concepts row instead of updating the original one.
-  if (this.isActiveConcept(item)) return;
-  this.router.navigate(['/concept-create', item.ConceptId]);
-}
-
-/** Whether a Latest-Updates card is the concept currently open on the
- *  page. Compares as STRINGS on purpose: this.conceptId always comes
- *  from the route param (Angular route params are always strings), but
- *  item.ConceptId's *actual* runtime type depends on whatever
- *  /api/latest-updates serializes it as — the `ConceptId: string`
- *  interface field above is only a compile-time annotation, not a
- *  guarantee. If the backend returns it as a JSON number for some rows
- *  (mixed int/varchar concept-id columns, legacy vs new data, etc.), a
- *  strict `===` against the route's string id fails ONLY for those rows
- *  — which is exactly why the active highlight used to work for some
- *  concepts and not others depending on which one you opened.
- *
- *  ALSO checks CurrentConceptId (the display/version id) as a fallback.
- *  This must always route on ConceptId (the stable anchor) — see the
- *  routing note on onSelectLatestConcept() — but if some OTHER entry
- *  point (e.g. the Dashboard's grid) ever navigates here using a
- *  display id instead of the anchor, this keeps the sidebar highlight
- *  working anyway rather than silently failing to match at all. This
- *  is a UI safety net only; it does not fix (and should not be relied
- *  on to mask) an upstream caller sending the wrong id — see that
- *  comment for why sending CurrentConceptId as concept_id on a
- *  subsequent Update is a real data-integrity risk, not just a display
- *  quirk. */
-isActiveConcept(item: LatestConceptItem): boolean {
-  const current = String(this.conceptId);
-  return String(item.ConceptId) === current || String(item.CurrentConceptId) === current;
-}
-
-loadUserFiles(): void {
-  const user_id = Number(sessionStorage.getItem('userId'));
-  if (!user_id) {
-    return;
+    this.activityHistoryLoading = true;
+    this.service.getConceptHistory(id).subscribe({
+      next: (res: { success: boolean; history: ActivityHistoryItem[]; dot_color_map?: Record<string, string> }) => {
+        this.activityHistory = res.history ?? [];
+        this.activityHistoryLoading = false;
+        if (res.dot_color_map) {
+          this.activityDotLegend = this.buildActivityDotLegend(res.dot_color_map);
+        }
+      },
+      error: (err) => {
+        console.error('Failed to load activity history', err);
+        this.activityHistory = [];
+        this.activityHistoryLoading = false;
+      }
+    });
   }
 
-  this.service.getuserfiles(user_id).subscribe({
-    next: (res) => {
-      console.log('User Files:', res);
+  /** Turns the backend's { activity_type: color } map into display-ready
+   *  legend rows, merging activity types that share the same color (e.g.
+   *  Attachment/Supporting Document both map to yellow) into a single
+   *  row so the legend doesn't repeat itself, and inserting spaces into
+   *  camelCase types (FieldUpdate -> "Field Update"). */
+  private buildActivityDotLegend(map: Record<string, string>): { color: string; colorLabel: string; label: string }[] {
+    const labelsByColor = new Map<string, string[]>();
+    Object.entries(map).forEach(([activityType, color]) => {
+      const label = activityType.replace(/([a-z])([A-Z])/g, '$1 $2');
+      const existing = labelsByColor.get(color) ?? [];
+      if (!existing.includes(label)) existing.push(label);
+      labelsByColor.set(color, existing);
+    });
+    return Array.from(labelsByColor.entries()).map(([color, labels]) => ({
+      color,
+      colorLabel: color.charAt(0).toUpperCase() + color.slice(1),
+      label: labels.join(' / ')
+    }));
+  }
 
-      // Populate supporting documents here
-      // this.supportingDocs = res.data;
-    },
-    error: (err) => {
-      console.error('Failed to load user files', err);
-      this.toastr.error('Failed to load supporting documents', 'Error');
+  /** Recomputes the popover's fixed-position coordinates from the info
+   *  icon's current on-screen position. Called right before the popover
+   *  opens (on hover-in and on click) so it always anchors correctly, even
+   *  if the page has scrolled or the layout has changed since last time. */
+  private positionActivityLegend(): void {
+    const wrapEl = this.activityLegendWrapRef?.nativeElement;
+    if (!wrapEl) return;
+
+    const rect = wrapEl.getBoundingClientRect();
+    const POPOVER_WIDTH = 240;
+    const GAP = 6;
+    const VIEWPORT_MARGIN = 8;
+
+    // Right-align the popover's right edge with the icon's right edge (like
+    // the old `right: 0` did), but clamp so it never runs off the left edge
+    // of the viewport.
+    let left = rect.right - POPOVER_WIDTH;
+    left = Math.max(VIEWPORT_MARGIN, left);
+
+    this.activityLegendPos = { top: rect.bottom + GAP, left };
+  }
+
+  /** Hover-in handler on the icon wrapper — repositions the popover so it's
+   *  correctly placed for the CSS-driven :hover preview. Also clears any
+   *  lingering force-closed state from a previous close, so hovering the
+   *  icon again always shows the popover as expected. */
+  onActivityLegendHoverStart(): void {
+    this.positionActivityLegend();
+    this.legendHoverSuppressed = false;
+  }
+
+  toggleActivityLegend(): void {
+    this.positionActivityLegend();
+    this.showActivityLegend = !this.showActivityLegend;
+    this.legendHoverSuppressed = false;
+  }
+
+  /** Bound to .legend-force-closed — see the matching CSS comment. The
+   *  pointer is typically still over the popover when this runs (it's
+   *  what you just clicked), so plain :hover on .activity-legend-wrap
+   *  would otherwise keep the popover visible until the mouse physically
+   *  left it. This flag forces it hidden immediately on click, and is
+   *  cleared by the wrap's (mouseleave) once the pointer actually moves
+   *  off, so a fresh hover behaves normally again. */
+  legendHoverSuppressed = false;
+
+  closeActivityLegend(): void {
+    this.showActivityLegend = false;
+    this.legendHoverSuppressed = true;
+  }
+
+  openActivityDetail(item: ActivityHistoryItem): void {
+    this.selectedActivity = item;
+  }
+
+  closeActivityDetail(): void {
+    this.selectedActivity = null;
+  }
+
+  /** Old/new values for date fields (QA Schedule, Production Schedule, etc.)
+   *  come back from the API as full timestamps, e.g. "2026-09-11 00:00:00".
+   *  The audit popup only needs the date, shown as MM/DD/YYYY. Anything
+   *  that isn't a plain date/timestamp string (e.g. a text or dropdown
+   *  change) is returned unchanged. */
+  formatActivityValue(value: string): string {
+    if (!value) {
+      return value;
     }
-  });
-}
-
-private static validDateRange(control: import('@angular/forms').AbstractControl) {
-  const val: string = control.value;
-  if (!val) return null;
-  const year = new Date(val).getFullYear();
-  if (isNaN(year) || year < 1900 || year > 3000) {
-    return { invalidDateRange: true };
-  }
-  return null;
-}
-
-/** Rejects any date before today — backs up the [min] attribute on the
- *  date input, since native min/max can be bypassed by manual keyboard
- *  entry in some browsers (notably Firefox). Compares by calendar day,
- *  not time-of-day, so "today" itself is always valid regardless of
- *  current time.
- *
- *  Only enforced while the control is `dirty` (the user is actively
- *  picking/typing a date right now). patchForm() loads an existing
- *  concept's saved QASchedule/ProductionSchedule via patchValue(),
- *  which leaves the control pristine — so a concept created weeks ago
- *  with a QA/Production date that has since arrived (or passed) must
- *  NOT be flagged here. Those dates recording when QA/production
- *  actually happened are supposed to end up in the past; that's normal,
- *  not an error. Without the dirty check, that concept would become
- *  permanently un-updatable — this validator would block saving ANY
- *  field, forever, just because time moved on since it was created.
- *  Once the user actually edits one of these fields to a new value,
- *  the control becomes dirty and the "no past dates" rule correctly
- *  applies to that new pick. */
-private static notPastDate(control: import('@angular/forms').AbstractControl) {
-  const val: string = control.value;
-  if (!val) return null;
-  if (!control.dirty) return null;
-  const selected = new Date(val);
-  selected.setHours(0, 0, 0, 0);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  if (selected < today) {
-    return { pastDate: true };
-  }
-  return null;
-}
-
-limitToDigits(event: Event, controlName: string, maxDigits: number = 9): void {
-  const input = event.target as HTMLInputElement;
-  let value = input.value.replace(/\D/g, ''); // strip non-digits
-
-  if (value.length > maxDigits) {
-    value = value.slice(0, maxDigits);
+    const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T]\d{2}:\d{2}:\d{2})?$/);
+    if (!match) {
+      return value;
+    }
+    const [, year, month, day] = match;
+    return `${month}/${day}/${year}`;
   }
 
-  input.value = value;
-  this.form.get(controlName)?.setValue(value ? Number(value) : null, { emitEvent: false });
-}
-
-/** Same digit-only stripping as limitToDigits, but Halo Number specifically
- *  must never be exactly zero. Leading zeros are otherwise left alone —
- *  "0025" stays "0025" — this only blocks the value from being the
- *  single digit "0" itself. */
-limitToDigitsNoZero(event: Event, controlName: string, maxDigits: number = 9): void {
-  const input = event.target as HTMLInputElement;
-  let value = input.value.replace(/\D/g, ''); // strip non-digits
-
-  // Only reject the exact value "0" — everything else (including
-  // values with leading zeros like "0025") passes through untouched.
-  if (value === '0') {
-    value = '';
+  private static validDateRange(control: import('@angular/forms').AbstractControl) {
+    const val: string = control.value;
+    if (!val) return null;
+    const year = new Date(val).getFullYear();
+    if (isNaN(year) || year < 1900 || year > 3000) {
+      return { invalidDateRange: true };
+    }
+    return null;
   }
 
-  if (value.length > maxDigits) {
-    value = value.slice(0, maxDigits);
+  /** Rejects any date before today — backs up the [min] attribute on the
+   *  date input, since native min/max can be bypassed by manual keyboard
+   *  entry in some browsers (notably Firefox). Compares by calendar day,
+   *  not time-of-day, so "today" itself is always valid regardless of
+   *  current time.
+   *
+   *  Only enforced while the control is `dirty` (the user is actively
+   *  picking/typing a date right now). patchForm() loads an existing
+   *  concept's saved QASchedule/ProductionSchedule via patchValue(),
+   *  which leaves the control pristine — so a concept created weeks ago
+   *  with a QA/Production date that has since arrived (or passed) must
+   *  NOT be flagged here. Those dates recording when QA/production
+   *  actually happened are supposed to end up in the past; that's normal,
+   *  not an error. Without the dirty check, that concept would become
+   *  permanently un-updatable — this validator would block saving ANY
+   *  field, forever, just because time moved on since it was created.
+   *  Once the user actually edits one of these fields to a new value,
+   *  the control becomes dirty and the "no past dates" rule correctly
+   *  applies to that new pick. */
+  private static notPastDate(control: import('@angular/forms').AbstractControl) {
+    const val: string = control.value;
+    if (!val) return null;
+    if (!control.dirty) return null;
+    const selected = new Date(val);
+    selected.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (selected < today) {
+      return { pastDate: true };
+    }
+    return null;
   }
 
-  input.value = value;
-  this.form.get(controlName)?.setValue(value ? Number(value) : null, { emitEvent: false });
-}
+  limitToDigits(event: Event, controlName: string, maxDigits: number = 9): void {
+    const input = event.target as HTMLInputElement;
+    let value = input.value.replace(/\D/g, ''); // strip non-digits
 
-/** Strips anything that isn't a letter or digit as the user types —
- *  Previous Report ID must not contain spaces, punctuation, or any
- *  other special characters. */
-restrictSpecialChars(event: Event, controlName: string): void {
-  const input = event.target as HTMLInputElement;
-  const value = input.value.replace(/[^a-zA-Z0-9]/g, '');
+    if (value.length > maxDigits) {
+      value = value.slice(0, maxDigits);
+    }
 
-  input.value = value;
-  this.form.get(controlName)?.setValue(value, { emitEvent: false });
-}
-get draftLockMessage(): string {
-  return !this.conceptId
-    ? 'This concept hasn\'t been saved yet. Save the Concept Information first to enable Client Approval and Supporting Document.'
-    : 'This concept is saved as a draft. Save the Concept Information to enable Client Approval and Supporting Document.';
-}
+    input.value = value;
+    this.form.get(controlName)?.setValue(value ? Number(value) : null, { emitEvent: false });
+  }
+
+  /** Same digit-only stripping as limitToDigits, but Halo Number specifically
+   *  must never be exactly zero. Leading zeros are otherwise left alone —
+   *  "0025" stays "0025" — this only blocks the value from being the
+   *  single digit "0" itself. */
+  limitToDigitsNoZero(event: Event, controlName: string, maxDigits: number = 9): void {
+    const input = event.target as HTMLInputElement;
+    let value = input.value.replace(/\D/g, ''); // strip non-digits
+
+    // Only reject the exact value "0" — everything else (including
+    // values with leading zeros like "0025") passes through untouched.
+    if (value === '0') {
+      value = '';
+    }
+
+    if (value.length > maxDigits) {
+      value = value.slice(0, maxDigits);
+    }
+
+    input.value = value;
+    this.form.get(controlName)?.setValue(value ? Number(value) : null, { emitEvent: false });
+  }
+
+  /** Strips anything that isn't a letter or digit as the user types —
+   *  Previous Report ID must not contain spaces, punctuation, or any
+   *  other special characters. */
+  restrictSpecialChars(event: Event, controlName: string): void {
+    const input = event.target as HTMLInputElement;
+    const value = input.value.replace(/[^a-zA-Z0-9]/g, '');
+
+    input.value = value;
+    this.form.get(controlName)?.setValue(value, { emitEvent: false });
+  }
+  get draftLockMessage(): string {
+    return !this.conceptId
+      ? 'This concept hasn\'t been saved yet. Save the Concept Information first to enable Client Approval and Supporting Document.'
+      : 'This concept is saved as a draft. Save the Concept Information to enable Client Approval and Supporting Document.';
+  }
 }
